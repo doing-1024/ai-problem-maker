@@ -1,0 +1,9 @@
+{
+  "name": "ai-problem-maker-client",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.js",
+    "build": "vite build"
+  }
+}

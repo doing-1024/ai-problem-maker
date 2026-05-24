@@ -82,6 +82,7 @@ out
 .nuxt
 dist
 .output
+workspaces/
 
 # Gatsby files
 .cache/
