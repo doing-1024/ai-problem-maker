@@ -78,6 +78,14 @@ export async function callLLM(messages, options = {}) {
 
 function mockLLM(messages, options = {}) {
   const joined = messages.map(item => `${item.role}: ${item.content}`).join('\n');
+  if (joined.includes('PROBLEM_REVIEW')) {
+    return 'PASS\n- 本地 mock 跳过难度与算法范式审校。';
+  }
+
+  if (joined.includes('PROBLEM_REVISE')) {
+    return `# 修订题目\n\n## 题意\n给定一个由用户素材改编的新问题，请根据用户难度要求选择同一算法谱系内的合适模型。\n\n## 输入格式\n第一行一个整数 n。\n第二行 n 个整数。\n\n## 输出格式\n输出一个整数。\n\n## 样例\n\n### 样例输入\n\`\`\`\n3\n1 2 3\n\`\`\`\n\n### 样例输出\n\`\`\`\n6\n\`\`\`\n\n## 数据范围与提示\n- 数据范围应与用户要求的难度一致。\n- 改编应保持原题基础算法范式。\n`;
+  }
+
   if (joined.includes('PROBLEM_REWRITE')) {
     return `# 改编题目\n\n> 这里是本地开发用的占位改编结果。\n\n${extractSourceHint(joined)}\n\n## 题意\n给定一个由用户素材改编的新问题，请根据用户难度要求选择合适的算法模型。\n\n## 输入格式\n第一行一个整数 n。\n第二行 n 个整数。\n\n## 输出格式\n输出一个整数。\n\n## 样例\n\n### 样例输入\n\`\`\`\n3\n1 2 3\n\`\`\`\n\n### 样例输出\n\`\`\`\n6\n\`\`\`\n\n## 数据范围与提示\n- 数据范围应与用户要求的难度一致。\n- 可以使用与原题不同的算法和建模方式。\n`;
   }

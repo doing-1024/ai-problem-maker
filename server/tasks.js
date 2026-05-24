@@ -131,6 +131,7 @@ export async function generateProblem(workspaceId, payload) {
         emitProblemPreview(workspaceId, content);
       }
       content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction, difficultyMode);
+      content = await reviewAndReviseProblem(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
@@ -145,6 +146,108 @@ export async function generateProblem(workspaceId, payload) {
       throw error;
     }
   });
+}
+
+async function reviewAndReviseProblem(workspaceId, initialContent, source, difficultyInstruction, difficultyMode) {
+  let content = initialContent || '';
+  for (let round = 1; round <= 2; round += 1) {
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'problem',
+      state: 'running',
+      message: `正在审校题目难度与算法范式 ${round}/2`
+    });
+    const critique = await callLLM(
+      [
+        {
+          role: 'system',
+          content:
+            '你是严格的 OI 出题审稿员。只判断题目是否满足要求，不要迎合。必须检查：1. 是否严格命中用户目标难度，尤其 NOIP T1 不能降成 CSP-J T1；2. 是否保持原题基础算法范式，例如 DP 仍是 DP、图论仍是图论，不能改成 BFS/贪心/纯模拟等无关算法；3. 是否只是改题名或背景而没有实质改编。输出第一行只能是 PASS 或 FAIL，后面用简短中文列出理由和必须修改点。标记为 PROBLEM_REVIEW。'
+        },
+        {
+          role: 'user',
+          content: [
+            'PROBLEM_REVIEW',
+            `用户难度要求: ${difficultyInstruction}`,
+            `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
+            '原始题面:',
+            source || '',
+            '候选题面:',
+            content || ''
+          ].join('\n')
+        }
+      ],
+      {
+        temperature: 0.05,
+        timeoutMs: 90000,
+        maxTokens: 4096,
+        retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', `problem review ${round}`, info);
+        },
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `题目审校重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] review retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      }
+    );
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] review ${round}: ${critique.slice(0, 1200)}\n`);
+    if (/^\s*PASS\b/i.test(critique)) {
+      return content;
+    }
+
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'problem',
+      state: 'running',
+      message: `正在按审校意见重写题目 ${round}/2`
+    });
+    content = await callLLM(
+      [
+        {
+          role: 'system',
+          content:
+            '你是资深 OI 题目修订员。根据审稿意见重写题面。必须严格命中用户目标难度，不得降档；必须保持原题基础算法范式一致，只能在同一算法谱系内调整难度；同时可以大幅重写背景和叙事。只输出完整 Markdown 题面，结构为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。标记为 PROBLEM_REVISE。'
+        },
+        {
+          role: 'user',
+          content: [
+            'PROBLEM_REVISE',
+            `用户难度要求: ${difficultyInstruction}`,
+            `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
+            '原始题面:',
+            source || '',
+            '上一版题面:',
+            content || '',
+            '审稿意见:',
+            critique || ''
+          ].join('\n')
+        }
+      ],
+      {
+        temperature: 0.15,
+        timeoutMs: 90000,
+        maxTokens: 8192,
+        retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', `problem revise ${round}`, info);
+        },
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `题目重写重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] revise retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      }
+    );
+    emitProblemPreview(workspaceId, content);
+    content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction, difficultyMode);
+  }
+  return content;
 }
 
 async function completeProblemMarkdown(workspaceId, initialContent, source, difficultyInstruction, difficultyMode) {
