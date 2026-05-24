@@ -75,7 +75,7 @@ export async function generateProblem(workspaceId, payload) {
           ].join('\n')
         }
       ];
-      let content = await callLLM(prompt, { temperature: 0.3 });
+      let content = await callLLM(prompt, { temperature: 0.3, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
       if (!looksLikeProblemMarkdown(content)) {
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在修正题面格式' });
@@ -83,7 +83,7 @@ export async function generateProblem(workspaceId, payload) {
           { role: 'system', content: '你是 Markdown 修复助手，只修正文结构，不改变题意。必须输出完整题面。' },
           { role: 'user', content: ['SOURCE_TEXT:', content || ''].join('\n') }
         ];
-        content = await callLLM(repairPrompt, { temperature: 0.1, timeoutMs: 45000 });
+        content = await callLLM(repairPrompt, { temperature: 0.1, timeoutMs: 45000, retries: 5 });
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
       }
       ensureMarkdownStructure(content, ['title']);
@@ -128,14 +128,14 @@ export async function generateSolution(workspaceId) {
         { role: 'system', content: '你是资深 OI 题解助手。先输出初稿。标记为 SOLUTION_DRAFT。' },
         { role: 'user', content: ['SOLUTION_DRAFT', 'SOURCE_TEXT:', problem || ''].join('\n') }
       ];
-      const draft = await callLLM(draftPrompt, { temperature: 0.2 });
+      const draft = await callLLM(draftPrompt, { temperature: 0.2, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'draft', text: draft.slice(0, 320) });
 
       const critiquePrompt = [
         { role: 'system', content: '你是严厉的 OI 题解审校员，只找错误，不写空话。标记为 SOLUTION_CRITIC。' },
         { role: 'user', content: ['SOLUTION_CRITIC', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || ''].join('\n') }
       ];
-      const critique = await callLLM(critiquePrompt, { temperature: 0.1 });
+      const critique = await callLLM(critiquePrompt, { temperature: 0.1, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'critic', text: critique.slice(0, 320) });
 
       const revisePrompt = [
@@ -145,7 +145,7 @@ export async function generateSolution(workspaceId) {
           content: ['SOLUTION_FINAL', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || '', 'CRITIQUE:', critique || ''].join('\n')
         }
       ];
-      const finalText = await callLLM(revisePrompt, { temperature: 0.2 });
+      const finalText = await callLLM(revisePrompt, { temperature: 0.2, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
       const cpp = extractCodeBlock(finalText, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
       const markdown = stripCppBlock(finalText);
@@ -196,7 +196,7 @@ export async function generateDataPlan(workspaceId) {
         { role: 'system', content: '你是资深 OI 数据构造助手。标记为 DATA_PLAN。' },
         { role: 'user', content: ['DATA_PLAN', 'SOURCE_TEXT:', solution || ''].join('\n') }
       ];
-      const plan = await callLLM(planPrompt, { temperature: 0.2 });
+      const plan = await callLLM(planPrompt, { temperature: 0.2, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan.slice(0, 320) });
       ensureMarkdownStructure(plan, ['title', '## 点数分布']);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
@@ -205,7 +205,7 @@ export async function generateDataPlan(workspaceId) {
         { role: 'system', content: '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。' },
         { role: 'user', content: ['GEN_PY', 'SOURCE_TEXT:', plan || ''].join('\n') }
       ];
-      const genPy = await callLLM(genPrompt, { temperature: 0.2 });
+      const genPy = await callLLM(genPrompt, { temperature: 0.2, retries: 5 });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);

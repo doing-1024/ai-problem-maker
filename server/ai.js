@@ -5,31 +5,43 @@ export async function callLLM(messages, options = {}) {
     return mockLLM(messages, options);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
-  const response = await fetch(`${process.env.LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.LLM_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    signal: controller.signal,
-    body: JSON.stringify({
-      model: process.env.LLM_MODEL_NAME,
-      messages,
-      temperature: options.temperature ?? 0.2
-    })
-  });
-  clearTimeout(timeout);
+  const retries = Number.isInteger(options.retries) ? options.retries : 5;
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
+      const response = await fetch(`${process.env.LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.LLM_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: process.env.LLM_MODEL_NAME,
+          messages,
+          temperature: options.temperature ?? 0.2
+        })
+      });
+      clearTimeout(timeout);
 
-  if (!response.ok) {
-    throw new Error(`LLM request failed: ${response.status} ${await response.text()}`);
+      if (!response.ok) {
+        throw new Error(`LLM request failed: ${response.status} ${await response.text()}`);
+      }
+
+      const data = await response.json();
+      const content = data?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('LLM response missing content');
+      return content;
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries) {
+        await sleep(Math.min(1000 * attempt, 3000));
+      }
+    }
   }
-
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('LLM response missing content');
-  return content;
+  throw lastError || new Error('LLM failed');
 }
 
 function mockLLM(messages, options = {}) {
@@ -66,4 +78,8 @@ function extractSourceHint(joined) {
   const idx = joined.indexOf(marker);
   if (idx === -1) return '';
   return joined.slice(idx + marker.length).slice(0, 200);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
