@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { ensureAppDirs, listWorkspaces, createWorkspace, getWorkspaceMeta, getWorkspaceMetaInternal, readWorkspaceFile, writeWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip, isAllowedReadablePath } from './workspace.js';
 import { generateProblem, generateSolution, generateDataPlan, runDataGenerator } from './tasks.js';
+import { subscribeWorkspace } from './events.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -96,6 +97,15 @@ app.get('/api/workspaces/:id/logs', async (req, res) => {
       }
     }
     res.json({ logs });
+  } catch (error) {
+    res.status(error.statusCode || 404).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspaces/:id/events', async (req, res) => {
+  try {
+    await requireWorkspaceAccess(req, req.params.id);
+    subscribeWorkspace(req.params.id, res);
   } catch (error) {
     res.status(error.statusCode || 404).json({ error: error.message });
   }

@@ -63,6 +63,15 @@
       </aside>
 
       <section class="content">
+        <div class="panel live-panel" v-if="liveEvent || liveText">
+          <div class="panel-head">
+            <h2>实时反馈</h2>
+            <span class="panel-chip">stream</span>
+          </div>
+          <div class="live-meta" v-if="liveEvent">{{ liveEvent.stage }} · {{ liveEvent.state || liveEvent.phase }}</div>
+          <pre>{{ liveText }}</pre>
+        </div>
+
         <div v-if="errorMessage" class="alert">{{ errorMessage }}</div>
 
         <div v-if="tab === 'problem'" class="panel">
@@ -140,6 +149,8 @@ const difficultyMode = ref('same');
 const difficultyText = ref('');
 const errorMessage = ref('');
 const logsText = ref('');
+const liveText = ref('');
+const liveEvent = ref(null);
 const status = ref({
   problem: { state: 'idle' },
   solution: { state: 'idle' },
@@ -194,6 +205,7 @@ async function loadWorkspace() {
 async function createWorkspace() {
   const meta = await api('/api/workspaces', { method: 'POST' });
   persistWorkspace(meta);
+  connectLiveFeed();
   await loadWorkspace();
 }
 
@@ -243,19 +255,23 @@ async function saveProblemRaw() {
 
 async function generateProblem() {
   errorMessage.value = '';
-  const result = await api(`/api/workspaces/${workspaceId.value}/problem`, {
-    method: 'POST',
-    body: JSON.stringify({
-      difficultyMode: difficultyMode.value,
-      difficultyText: difficultyText.value,
-      sourceText: problemRaw.value
-    })
-  });
-  selectedContent.value = result.content;
-  if (result.cached) {
-    errorMessage.value = '题目已命中缓存';
+  try {
+    const result = await api(`/api/workspaces/${workspaceId.value}/problem`, {
+      method: 'POST',
+      body: JSON.stringify({
+        difficultyMode: difficultyMode.value,
+        difficultyText: difficultyText.value,
+        sourceText: problemRaw.value
+      })
+    });
+    selectedContent.value = result.content;
+    if (result.cached) {
+      errorMessage.value = '题目已命中缓存';
+    }
+    await refreshAll();
+  } catch (error) {
+    errorMessage.value = error.message;
   }
-  await refreshAll();
 }
 
 async function generateSolution() {
@@ -318,6 +334,7 @@ async function downloadAll() {
 onMounted(async () => {
   if (!workspaceId.value || !workspaceToken.value) return;
   try {
+    connectLiveFeed();
     await loadWorkspace();
     const res = await fetch(`/api/workspaces/${workspaceId.value}/files/input/problem_raw.md`, {
       headers: {
@@ -331,4 +348,32 @@ onMounted(async () => {
     errorMessage.value = error.message;
   }
 });
+
+let eventSource = null;
+function connectLiveFeed() {
+  if (!workspaceId.value || !workspaceToken.value) return;
+  if (eventSource) eventSource.close();
+  const url = new URL(`/api/workspaces/${workspaceId.value}/events`, window.location.origin);
+  url.searchParams.set('token', workspaceToken.value);
+  eventSource = new EventSource(url.toString());
+  eventSource.addEventListener('task:update', ev => {
+    const data = JSON.parse(ev.data);
+    liveEvent.value = data;
+    if (data.stage && status.value[data.stage]) {
+      status.value[data.stage] = {
+        ...(status.value[data.stage] || {}),
+        state: data.state || status.value[data.stage].state,
+        message: data.message || status.value[data.stage].message || ''
+      };
+    }
+  });
+  eventSource.addEventListener('task:partial', ev => {
+    const data = JSON.parse(ev.data);
+    liveEvent.value = data;
+    liveText.value = data.text || '';
+  });
+  eventSource.onerror = () => {
+    liveText.value = liveText.value || 'stream disconnected, retrying...';
+  };
+}
 </script>

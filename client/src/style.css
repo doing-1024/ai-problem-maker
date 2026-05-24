@@ -240,6 +240,19 @@ select {
   gap: 16px;
 }
 
+.live-panel {
+  border-color: rgba(0, 188, 212, 0.28);
+  background: linear-gradient(180deg, rgba(26, 26, 26, 0.98), rgba(13, 13, 13, 0.98));
+}
+
+.live-meta {
+  margin: -2px 0 8px;
+  color: var(--cyan);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .panel {
   padding: 16px;
 }

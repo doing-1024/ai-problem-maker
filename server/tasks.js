@@ -6,6 +6,7 @@ import zlib from 'zlib';
 import { spawn } from 'child_process';
 import { callLLM } from './ai.js';
 import { withWorkspaceLock } from './job-lock.js';
+import { emitWorkspaceEvent } from './events.js';
 import { appendWorkspaceLog, getWorkspaceMetaInternal, updateWorkspaceMeta, writeWorkspaceFile, readWorkspaceFile } from './workspace.js';
 
 function stamp() {
@@ -59,6 +60,7 @@ export async function generateProblem(workspaceId, payload) {
       }
 
       await setState(workspaceId, 'problem', 'running', '正在改编题目');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在改编题目' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start problem generation\n`);
       const prompt = [
         { role: 'system', content: '你是资深 OI 题目改编助手。输出必须是 Markdown。标记为 PROBLEM_REWRITE。' },
@@ -73,15 +75,27 @@ export async function generateProblem(workspaceId, payload) {
           ].join('\n')
         }
       ];
-      const content = await callLLM(prompt, { temperature: 0.3 });
-      ensureMarkdownStructure(content, ['title', '## 题意']);
+      let content = await callLLM(prompt, { temperature: 0.3 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
+      if (!looksLikeProblemMarkdown(content)) {
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在修正题面格式' });
+        const repairPrompt = [
+          { role: 'system', content: '你是 Markdown 修复助手，只修正文结构，不改变题意。必须输出完整题面。' },
+          { role: 'user', content: ['SOURCE_TEXT:', content || ''].join('\n') }
+        ];
+        content = await callLLM(repairPrompt, { temperature: 0.1, timeoutMs: 45000 });
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
+      }
+      ensureMarkdownStructure(content, ['title']);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
       await setState(workspaceId, 'problem', 'done', '题目已生成');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'done', message: '题目已生成' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] done\n`);
       return { path: 'problem/problem.md', content, cached: false };
     } catch (error) {
       await setState(workspaceId, 'problem', 'error', error.message || 'problem failed');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'error', message: error.message || 'problem failed' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] failed: ${error.message}\n`);
       throw error;
     }
@@ -108,18 +122,21 @@ export async function generateSolution(workspaceId) {
       }
 
       await setState(workspaceId, 'solution', 'running', '正在生成题解');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'running', message: '正在生成题解' });
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start solution generation\n`);
       const draftPrompt = [
         { role: 'system', content: '你是资深 OI 题解助手。先输出初稿。标记为 SOLUTION_DRAFT。' },
         { role: 'user', content: ['SOLUTION_DRAFT', 'SOURCE_TEXT:', problem || ''].join('\n') }
       ];
       const draft = await callLLM(draftPrompt, { temperature: 0.2 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'draft', text: draft.slice(0, 320) });
 
       const critiquePrompt = [
         { role: 'system', content: '你是严厉的 OI 题解审校员，只找错误，不写空话。标记为 SOLUTION_CRITIC。' },
         { role: 'user', content: ['SOLUTION_CRITIC', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || ''].join('\n') }
       ];
       const critique = await callLLM(critiquePrompt, { temperature: 0.1 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'critic', text: critique.slice(0, 320) });
 
       const revisePrompt = [
         { role: 'system', content: '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。' },
@@ -129,6 +146,7 @@ export async function generateSolution(workspaceId) {
         }
       ];
       const finalText = await callLLM(revisePrompt, { temperature: 0.2 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
       const cpp = extractCodeBlock(finalText, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
       const markdown = stripCppBlock(finalText);
       ensureMarkdownStructure(markdown, ['title', '## 思路', '## 正确性', '## 复杂度']);
@@ -140,10 +158,12 @@ export async function generateSolution(workspaceId) {
         resultPaths: ['solution/solution.md', 'solution/std.cpp']
       });
       await setState(workspaceId, 'solution', 'done', '题解与标程已生成');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'done', message: '题解与标程已生成' });
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] done\n`);
       return { markdown, cpp, cached: false, critique };
     } catch (error) {
       await setState(workspaceId, 'solution', 'error', error.message || 'solution failed');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'error', message: error.message || 'solution failed' });
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] failed: ${error.message}\n`);
       throw error;
     }
@@ -170,12 +190,14 @@ export async function generateDataPlan(workspaceId) {
       }
 
       await setState(workspaceId, 'data', 'running', '正在生成数据方案');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在生成数据方案' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start data planning\n`);
       const planPrompt = [
         { role: 'system', content: '你是资深 OI 数据构造助手。标记为 DATA_PLAN。' },
         { role: 'user', content: ['DATA_PLAN', 'SOURCE_TEXT:', solution || ''].join('\n') }
       ];
       const plan = await callLLM(planPrompt, { temperature: 0.2 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan.slice(0, 320) });
       ensureMarkdownStructure(plan, ['title', '## 点数分布']);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
 
@@ -184,6 +206,7 @@ export async function generateDataPlan(workspaceId) {
         { role: 'user', content: ['GEN_PY', 'SOURCE_TEXT:', plan || ''].join('\n') }
       ];
       const genPy = await callLLM(genPrompt, { temperature: 0.2 });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
       await writeWorkspaceFile(workspaceId, 'data/gen.py', genPy);
@@ -191,10 +214,12 @@ export async function generateDataPlan(workspaceId) {
         resultPaths: ['data/hack_plan.md', 'data/gen.py']
       });
       await setState(workspaceId, 'data', 'done', '数据方案与生成器已生成');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据方案与生成器已生成' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] done\n`);
       return { plan, genPy, cached: false };
     } catch (error) {
       await setState(workspaceId, 'data', 'error', error.message || 'data planning failed');
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'error', message: error.message || 'data planning failed' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] failed: ${error.message}\n`);
       throw error;
     }
@@ -216,17 +241,21 @@ export async function runDataGenerator(workspaceId) {
     }
 
     await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start generator run\n`);
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在运行数据生成器' });
     try {
       const result = await executePythonGenerator(workspaceId, genPy);
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
       assertDataZipLooksValid(result.zipContent);
       await verifyZipArchive(result.zipContent);
       await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
       await saveJobResult(workspaceId, 'run', fingerprint, { resultPath: 'data/datas.zip' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run finished\n`);
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据包已生成' });
       return { artifact: 'data/datas.zip', cached: false, stdout: result.stdout, stderr: result.stderr };
     } catch (error) {
       await setState(workspaceId, 'data', 'error', error.message || 'run failed');
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run failed: ${error.message}\n`);
+      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'error', message: error.message || 'run failed' });
       throw error;
     }
   });
@@ -348,6 +377,13 @@ function assertValidText(text, message) {
     error.statusCode = 400;
     throw error;
   }
+}
+
+function looksLikeProblemMarkdown(text) {
+  const content = String(text || '');
+  const hasTitle = /^#\s+\S+/m.test(content);
+  const hasBody = content.length > 80;
+  return hasTitle && hasBody;
 }
 
 async function verifyCppCompiles(workspaceId, cpp) {
