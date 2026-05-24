@@ -69,7 +69,7 @@ export async function generateProblem(workspaceId, payload) {
         {
           role: 'system',
           content:
-            '你是资深 OI 题目设计师。你要根据用户给出的原题素材重新设计一道 OI 题。用户难度要求优先级最高。自定义难度时可以大幅改编：允许只保留背景、对象、故事或少量概念，算法、数据范围、约束、目标函数都可以完全不同；如果用户要求提高难度，可以主动加入更高级算法与更强数据范围。参考原题时应尽量保持算法难度和复杂度量级接近，但必须大幅更换题目背景、叙事、角色、对象、题名和变量语义，让选手难以通过题面关键词直接搜到原题。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
+            '你是资深 OI 题目设计师。你要根据用户给出的原题素材重新设计一道 OI 题。用户指定的目标难度必须严格遵守，不得擅自降级，例如用户要求 NOIP T1 时不能写成 CSP-J T1 或入门题。改编时必须保持原题的基础算法范式一致：原题如果核心是 DP，就仍应是 DP，可以升级为区间 DP、树形 DP、状态 DP、DP 套 DP 等；原题如果是图论，就仍应是图论；不要把 DP 改成 BFS/贪心/模拟，也不要跨到完全无关算法。可以大幅改换背景、故事、对象、题名和变量语义，让选手难以通过题面关键词直接搜到原题。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
         },
         {
           role: 'user',
@@ -130,7 +130,7 @@ export async function generateProblem(workspaceId, payload) {
         });
         emitProblemPreview(workspaceId, content);
       }
-      content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction);
+      content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
@@ -147,7 +147,7 @@ export async function generateProblem(workspaceId, payload) {
   });
 }
 
-async function completeProblemMarkdown(workspaceId, initialContent, source, difficultyInstruction) {
+async function completeProblemMarkdown(workspaceId, initialContent, source, difficultyInstruction, difficultyMode) {
   let content = initialContent || '';
   for (let round = 1; round <= 3; round += 1) {
     const missing = getProblemMarkdownIssues(content);
@@ -163,13 +163,13 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
         {
           role: 'system',
           content:
-            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。用户难度要求优先级最高；如果上一版过于保守，可以重新设计算法、数据范围和题目目标。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
+            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。用户目标难度必须严格遵守，不得降成更低档；同时保持原题基础算法范式一致，只允许在同一算法谱系内升级或降级。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
         },
         {
           role: 'user',
           content: [
             `用户难度要求: ${difficultyInstruction}`,
-            `改编策略: ${buildAdaptationInstruction('custom')}`,
+            `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
             `当前问题: ${missing.join('；')}`,
             '原始题面:',
             source || '',
@@ -604,9 +604,9 @@ function buildDifficultyInstruction(mode, text) {
 
 function buildAdaptationInstruction(mode) {
   if (String(mode || 'same') === 'same') {
-    return '参考原题难度与算法量级，但必须尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
+    return '参考原题难度与算法量级，并保持原题基础算法范式一致；同时必须尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
   }
-  return '按用户输入难度自由设计，可以更换算法、模型、约束和目标函数；不要求与原题解法相同。';
+  return '按用户输入的目标难度设计，目标难度必须严格命中；保持原题基础算法范式一致，可以在同一算法谱系内加强或弱化，例如普通 DP 可改为更复杂 DP，但不能改成 BFS、贪心、纯模拟等无关算法。背景、变量和叙事可以大幅重写。';
 }
 
 function ensureProblemMarkdownStructure(text) {

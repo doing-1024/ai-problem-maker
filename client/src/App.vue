@@ -65,7 +65,7 @@
               <option value="same">参考原题，强改背景</option>
               <option value="custom">用户自行设定</option>
             </select>
-            <input v-model="difficultyText" placeholder="输入你要的难度要求" />
+            <input v-model="difficultyText" placeholder="目标难度，如 NOIP T1；算法范式默认跟随原题" />
           </div>
           <div class="row">
             <button class="btn primary" @click="saveProblemRaw">保存题面</button>
