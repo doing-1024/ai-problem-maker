@@ -62,7 +62,7 @@
           <textarea v-model="problemRaw" placeholder="粘贴题面"></textarea>
           <div class="row">
             <select v-model="difficultyMode">
-              <option value="same">难度不变</option>
+              <option value="same">参考原题，强改背景</option>
               <option value="custom">用户自行设定</option>
             </select>
             <input v-model="difficultyText" placeholder="输入你要的难度要求" />

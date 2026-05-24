@@ -62,20 +62,23 @@ export async function generateProblem(workspaceId, payload) {
       await setState(workspaceId, 'problem', 'running', '正在改编题目');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在改编题目' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start problem generation\n`);
-      const difficultyInstruction = buildDifficultyInstruction(payload.difficultyMode || 'same', payload.difficultyText || '');
+      const difficultyMode = payload.difficultyMode || 'same';
+      const difficultyInstruction = buildDifficultyInstruction(difficultyMode, payload.difficultyText || '');
+      const adaptationInstruction = buildAdaptationInstruction(difficultyMode);
       const prompt = [
         {
           role: 'system',
           content:
-            '你是资深 OI 题目改编助手。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
+            '你是资深 OI 题目设计师。你要根据用户给出的原题素材重新设计一道 OI 题。用户难度要求优先级最高。自定义难度时可以大幅改编：允许只保留背景、对象、故事或少量概念，算法、数据范围、约束、目标函数都可以完全不同；如果用户要求提高难度，可以主动加入更高级算法与更强数据范围。参考原题时应尽量保持算法难度和复杂度量级接近，但必须大幅更换题目背景、叙事、角色、对象、题名和变量语义，让选手难以通过题面关键词直接搜到原题。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
         },
         {
           role: 'user',
           content: [
             'PROBLEM_REWRITE',
-            `难度模式: ${payload.difficultyMode || 'same'}`,
+            `难度模式: ${difficultyMode}`,
             `难度说明: ${payload.difficultyText || ''}`,
             `用户难度要求: ${difficultyInstruction}`,
+            `改编策略: ${adaptationInstruction}`,
             'SOURCE_TEXT:',
             source || ''
           ].join('\n')
@@ -104,7 +107,7 @@ export async function generateProblem(workspaceId, payload) {
           {
             role: 'system',
             content:
-              '你是 Markdown 修复助手，只修正文结构，不改变题意。必须输出完整题面，且补齐 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
+              '你是 Markdown 题面修复助手。优先修正文结构和补齐缺失段落；如果原输出明显只是轻微改名、没有满足用户难度要求，可以顺手重写题目核心。必须输出完整题面，且补齐 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
           },
           { role: 'user', content: ['SOURCE_TEXT:', content || ''].join('\n') }
         ];
@@ -160,12 +163,13 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
         {
           role: 'system',
           content:
-            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有 ### 样例输入 和 ### 样例输出。'
+            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。用户难度要求优先级最高；如果上一版过于保守，可以重新设计算法、数据范围和题目目标。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
         },
         {
           role: 'user',
           content: [
             `用户难度要求: ${difficultyInstruction}`,
+            `改编策略: ${buildAdaptationInstruction('custom')}`,
             `当前问题: ${missing.join('；')}`,
             '原始题面:',
             source || '',
@@ -566,8 +570,8 @@ function getProblemMarkdownIssues(text) {
   if (!content.includes('## 输入格式')) issues.push('缺少 ## 输入格式');
   if (!content.includes('## 输出格式')) issues.push('缺少 ## 输出格式');
   if (!content.includes('## 样例')) issues.push('缺少 ## 样例');
-  if (!content.includes('### 样例输入')) issues.push('缺少 ### 样例输入');
-  if (!content.includes('### 样例输出')) issues.push('缺少 ### 样例输出');
+  if (!hasSampleInputHeading(content)) issues.push('缺少样例输入');
+  if (!hasSampleOutputHeading(content)) issues.push('缺少样例输出');
   if (!content.includes('## 数据范围与提示')) issues.push('缺少 ## 数据范围与提示');
   if (/(\.\.\.|……|未完|待补|待续|省略号)/.test(content)) issues.push('含有省略或待补标记');
   const fenceCount = (content.match(/```/g) || []).length;
@@ -581,13 +585,28 @@ function getProblemMarkdownIssues(text) {
   return Array.from(new Set(issues));
 }
 
+function hasSampleInputHeading(content) {
+  return /#{2,4}\s*(样例\s*)?(输入|input)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输入样例/i.test(content);
+}
+
+function hasSampleOutputHeading(content) {
+  return /#{2,4}\s*(样例\s*)?(输出|output)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输出样例/i.test(content);
+}
+
 function buildDifficultyInstruction(mode, text) {
   const raw = String(text || '').trim();
   const normalizedMode = String(mode || 'same').trim();
   if (!raw) {
-    return normalizedMode === 'custom' ? '用户未填写具体难度，请优先保持与原题接近' : '保持与原题接近';
+    return normalizedMode === 'custom' ? '用户未填写具体难度，请自由选择合理难度' : '保持与原题接近';
   }
   return raw;
+}
+
+function buildAdaptationInstruction(mode) {
+  if (String(mode || 'same') === 'same') {
+    return '参考原题难度与算法量级，但必须尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
+  }
+  return '按用户输入难度自由设计，可以更换算法、模型、约束和目标函数；不要求与原题解法相同。';
 }
 
 function ensureProblemMarkdownStructure(text) {
