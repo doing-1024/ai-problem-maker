@@ -69,6 +69,7 @@
             <span class="panel-chip">stream</span>
           </div>
           <div class="live-meta" v-if="liveEvent">{{ liveEvent.stage }} · {{ liveEvent.state || liveEvent.phase }}</div>
+          <div class="live-meta" v-if="activeJobMessage">{{ activeJobMessage }}</div>
           <pre>{{ liveText }}</pre>
         </div>
 
@@ -85,7 +86,7 @@
               <option value="same">难度不变</option>
               <option value="custom">用户自行设定</option>
             </select>
-            <input v-model="difficultyText" placeholder="自定义难度说明" />
+            <input v-model="difficultyText" placeholder="输入你要的难度要求" />
           </div>
           <div class="row">
             <button class="btn primary" @click="saveProblemRaw">保存题面</button>
@@ -151,6 +152,7 @@ const errorMessage = ref('');
 const logsText = ref('');
 const liveText = ref('');
 const liveEvent = ref(null);
+const activeJobMessage = ref('');
 const status = ref({
   problem: { state: 'idle' },
   solution: { state: 'idle' },
@@ -359,6 +361,7 @@ function connectLiveFeed() {
   eventSource.addEventListener('task:update', ev => {
     const data = JSON.parse(ev.data);
     liveEvent.value = data;
+    activeJobMessage.value = data.message || '';
     if (data.stage && status.value[data.stage]) {
       status.value[data.stage] = {
         ...(status.value[data.stage] || {}),

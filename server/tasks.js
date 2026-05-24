@@ -62,31 +62,92 @@ export async function generateProblem(workspaceId, payload) {
       await setState(workspaceId, 'problem', 'running', '正在改编题目');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在改编题目' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start problem generation\n`);
+      const difficultyInstruction = buildDifficultyInstruction(payload.difficultyMode || 'same', payload.difficultyText || '');
       const prompt = [
-        { role: 'system', content: '你是资深 OI 题目改编助手。输出必须是 Markdown。标记为 PROBLEM_REWRITE。' },
+        {
+          role: 'system',
+          content:
+            '你是资深 OI 题目改编助手。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
+        },
         {
           role: 'user',
           content: [
             'PROBLEM_REWRITE',
             `难度模式: ${payload.difficultyMode || 'same'}`,
             `难度说明: ${payload.difficultyText || ''}`,
+            `用户难度要求: ${difficultyInstruction}`,
             'SOURCE_TEXT:',
             source || ''
           ].join('\n')
         }
       ];
-      let content = await callLLM(prompt, { temperature: 0.3, retries: 5 });
+      let content = await callLLM(prompt, {
+        temperature: 0.3,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `题目生成重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
       if (!looksLikeProblemMarkdown(content)) {
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在修正题面格式' });
         const repairPrompt = [
-          { role: 'system', content: '你是 Markdown 修复助手，只修正文结构，不改变题意。必须输出完整题面。' },
+          {
+            role: 'system',
+            content:
+              '你是 Markdown 修复助手，只修正文结构，不改变题意。必须输出完整题面，且补齐 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
+          },
           { role: 'user', content: ['SOURCE_TEXT:', content || ''].join('\n') }
         ];
-        content = await callLLM(repairPrompt, { temperature: 0.1, timeoutMs: 45000, retries: 5 });
+        content = await callLLM(repairPrompt, {
+          temperature: 0.1,
+          timeoutMs: 45000,
+          retries: 5,
+          onRetry: async ({ attempt, retries, error }) => {
+            emitWorkspaceEvent(workspaceId, 'task:update', {
+              stage: 'problem',
+              state: 'running',
+              message: `题面修复重试 ${attempt + 1}/${retries}`
+            });
+            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
+          }
+        });
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
       }
-      ensureMarkdownStructure(content, ['title']);
+      if (!problemHasCompleteMarkdown(content)) {
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在补全被截断的题面' });
+        content = await callLLM(
+          [
+            {
+              role: 'system',
+              content:
+                '你是题面补全助手。请根据已有内容重写为完整 Markdown 题面，不得出现省略号或残缺段落。必须包含 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
+            },
+            {
+              role: 'user',
+              content: ['SOURCE_TEXT:', content || '', `用户难度要求: ${difficultyInstruction}`].join('\n')
+            }
+          ],
+          {
+            temperature: 0.1,
+            retries: 5,
+            onRetry: async ({ attempt, retries, error }) => {
+              emitWorkspaceEvent(workspaceId, 'task:update', {
+                stage: 'problem',
+                state: 'running',
+                message: `题面补全重试 ${attempt + 1}/${retries}`
+              });
+              await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] completion retry ${attempt + 1}/${retries}: ${error.message}\n`);
+            }
+          }
+        );
+      }
+      ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
       await setState(workspaceId, 'problem', 'done', '题目已生成');
@@ -128,14 +189,36 @@ export async function generateSolution(workspaceId) {
         { role: 'system', content: '你是资深 OI 题解助手。先输出初稿。标记为 SOLUTION_DRAFT。' },
         { role: 'user', content: ['SOLUTION_DRAFT', 'SOURCE_TEXT:', problem || ''].join('\n') }
       ];
-      const draft = await callLLM(draftPrompt, { temperature: 0.2, retries: 5 });
+      const draft = await callLLM(draftPrompt, {
+        temperature: 0.2,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'solution',
+            state: 'running',
+            message: `题解初稿重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] draft retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'draft', text: draft.slice(0, 320) });
 
       const critiquePrompt = [
         { role: 'system', content: '你是严厉的 OI 题解审校员，只找错误，不写空话。标记为 SOLUTION_CRITIC。' },
         { role: 'user', content: ['SOLUTION_CRITIC', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || ''].join('\n') }
       ];
-      const critique = await callLLM(critiquePrompt, { temperature: 0.1, retries: 5 });
+      const critique = await callLLM(critiquePrompt, {
+        temperature: 0.1,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'solution',
+            state: 'running',
+            message: `题解审校重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] critic retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'critic', text: critique.slice(0, 320) });
 
       const revisePrompt = [
@@ -145,7 +228,18 @@ export async function generateSolution(workspaceId) {
           content: ['SOLUTION_FINAL', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || '', 'CRITIQUE:', critique || ''].join('\n')
         }
       ];
-      const finalText = await callLLM(revisePrompt, { temperature: 0.2, retries: 5 });
+      const finalText = await callLLM(revisePrompt, {
+        temperature: 0.2,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'solution',
+            state: 'running',
+            message: `题解修订重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] final retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
       const cpp = extractCodeBlock(finalText, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
       const markdown = stripCppBlock(finalText);
@@ -196,7 +290,18 @@ export async function generateDataPlan(workspaceId) {
         { role: 'system', content: '你是资深 OI 数据构造助手。标记为 DATA_PLAN。' },
         { role: 'user', content: ['DATA_PLAN', 'SOURCE_TEXT:', solution || ''].join('\n') }
       ];
-      const plan = await callLLM(planPrompt, { temperature: 0.2, retries: 5 });
+      const plan = await callLLM(planPrompt, {
+        temperature: 0.2,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'data',
+            state: 'running',
+            message: `数据方案重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] plan retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan.slice(0, 320) });
       ensureMarkdownStructure(plan, ['title', '## 点数分布']);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
@@ -205,7 +310,18 @@ export async function generateDataPlan(workspaceId) {
         { role: 'system', content: '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。' },
         { role: 'user', content: ['GEN_PY', 'SOURCE_TEXT:', plan || ''].join('\n') }
       ];
-      const genPy = await callLLM(genPrompt, { temperature: 0.2, retries: 5 });
+      const genPy = await callLLM(genPrompt, {
+        temperature: 0.2,
+        retries: 5,
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'data',
+            state: 'running',
+            message: `生成器重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] gen retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
@@ -384,6 +500,47 @@ function looksLikeProblemMarkdown(text) {
   const hasTitle = /^#\s+\S+/m.test(content);
   const hasBody = content.length > 80;
   return hasTitle && hasBody;
+}
+
+function problemHasCompleteMarkdown(text) {
+  const content = String(text || '').trim();
+  if (!content) return false;
+  if (content.length < 180) return false;
+  if (!/^#\s+\S+/m.test(content)) return false;
+  if (!content.includes('## 题意')) return false;
+  if (!content.includes('## 输入格式')) return false;
+  if (!content.includes('## 输出格式')) return false;
+  if (!content.includes('## 样例')) return false;
+  if (!content.includes('### 样例输入')) return false;
+  if (!content.includes('### 样例输出')) return false;
+  if (!content.includes('## 数据范围与提示')) return false;
+  if (/(\.\.\.|……|未完|待补|待续|省略号)/.test(content)) {
+    return false;
+  }
+  const fenceCount = (content.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) return false;
+  if (/[\u4e00-\u9fa5A-Za-z0-9]$/.test(content) && /[：:`]$/.test(content)) {
+    return false;
+  }
+  return !content.endsWith('：') && !content.endsWith('`') && !/等\s*$/.test(content);
+}
+
+function buildDifficultyInstruction(mode, text) {
+  const raw = String(text || '').trim();
+  const normalizedMode = String(mode || 'same').trim();
+  if (!raw) {
+    return normalizedMode === 'custom' ? '用户未填写具体难度，请优先保持与原题接近' : '保持与原题接近';
+  }
+  return raw;
+}
+
+function ensureProblemMarkdownStructure(text) {
+  ensureMarkdownStructure(text, ['title', '## 题意', '## 输入格式', '## 输出格式', '## 样例', '## 数据范围与提示']);
+  if (!problemHasCompleteMarkdown(text)) {
+    const error = new Error('markdown missing complete problem structure');
+    error.statusCode = 422;
+    throw error;
+  }
 }
 
 async function verifyCppCompiles(workspaceId, cpp) {

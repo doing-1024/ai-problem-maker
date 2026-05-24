@@ -11,34 +11,50 @@ export async function callLLM(messages, options = {}) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
-      const response = await fetch(`${process.env.LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.LLM_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: process.env.LLM_MODEL_NAME,
-          messages,
-          temperature: options.temperature ?? 0.2
-        })
-      });
-      clearTimeout(timeout);
+      try {
+        const response = await fetch(`${process.env.LLM_BASE_URL.replace(/\/$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.LLM_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: process.env.LLM_MODEL_NAME,
+            messages,
+            temperature: options.temperature ?? 0.2
+          })
+        });
 
-      if (!response.ok) {
-        throw new Error(`LLM request failed: ${response.status} ${await response.text()}`);
+        if (!response.ok) {
+          const body = await response.text();
+          const error = new Error(`LLM request failed: ${response.status} ${body}`);
+          error.statusCode = response.status;
+          throw error;
+        }
+
+        const data = await response.json();
+        const content = data?.choices?.[0]?.message?.content;
+        if (!content) throw new Error('LLM response missing content');
+        return content;
+      } finally {
+        clearTimeout(timeout);
       }
-
-      const data = await response.json();
-      const content = data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('LLM response missing content');
-      return content;
     } catch (error) {
       lastError = error;
-      if (attempt < retries) {
+      if (attempt < retries && isRetryableLLMError(error)) {
+        if (typeof options.onRetry === 'function') {
+          await options.onRetry({
+            attempt,
+            retries,
+            error,
+            waitMs: Math.min(1000 * attempt, 3000)
+          });
+        }
         await sleep(Math.min(1000 * attempt, 3000));
+        continue;
       }
+      break;
     }
   }
   throw lastError || new Error('LLM failed');
@@ -47,7 +63,16 @@ export async function callLLM(messages, options = {}) {
 function mockLLM(messages, options = {}) {
   const joined = messages.map(item => `${item.role}: ${item.content}`).join('\n');
   if (joined.includes('PROBLEM_REWRITE')) {
-    return `# 改编题目\n\n> 这里是本地开发用的占位改编结果。\n\n${extractSourceHint(joined)}\n\n## 题意\n给定一个整数序列，请设计一个满足约束的算法。\n\n## 输入格式\n略。\n\n## 输出格式\n略。\n`;
+    return `# 改编题目\n\n> 这里是本地开发用的占位改编结果。\n\n${extractSourceHint(joined)}\n\n## 题意\n给定一个整数序列，请设计一个满足约束的基础改编题。\n\n## 输入格式\n第一行一个整数 n。\n第二行 n 个整数。\n\n## 输出格式\n输出一个整数。\n\n## 样例\n\n### 样例输入\n\`\`\`\n3\n1 2 3\n\`\`\`\n\n### 样例输出\n\`\`\`\n6\n\`\`\`\n\n## 数据范围与提示\n- n 的范围较小，保证可用 O(n) 或 O(n \\log n) 解决。\n- 题目定位为 NOIP T1 级别基础题。\n`;
+  }
+
+  if (
+    joined.includes('Markdown 修复助手') ||
+    joined.includes('题面补全助手') ||
+    joined.includes('题目难度调节助手')
+  ) {
+    const source = extractSourceHint(joined);
+    return `# 改编题目\n\n> 本地开发占位输出，已补齐结构。\n\n${source || '原题面'}\n\n## 题意\n给定一个整数序列，请设计一个与用户难度要求一致的改编题。\n\n## 输入格式\n第一行一个整数 n。\n第二行 n 个整数。\n\n## 输出格式\n输出一个整数。\n\n## 样例\n\n### 样例输入\n\`\`\`\n3\n1 2 3\n\`\`\`\n\n### 样例输出\n\`\`\`\n6\n\`\`\`\n\n## 数据范围与提示\n- 题目难度、数据范围与题意描述保持和用户要求一致。\n- 仅做结构补全，不额外替用户压低或抬高难度。\n`;
   }
 
   if (joined.includes('SOLUTION_DRAFT')) {
@@ -82,4 +107,13 @@ function extractSourceHint(joined) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableLLMError(error) {
+  const status = Number(error?.statusCode || error?.status || 0);
+  if (status >= 500 || status === 429) return true;
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('fetch failed')) return true;
+  if (message.includes('network') || message.includes('timeout') || message.includes('abort')) return true;
+  return false;
 }
