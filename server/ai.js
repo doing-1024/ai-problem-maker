@@ -22,7 +22,8 @@ export async function callLLM(messages, options = {}) {
           body: JSON.stringify({
             model: process.env.LLM_MODEL_NAME,
             messages,
-            temperature: options.temperature ?? 0.2
+            temperature: options.temperature ?? 0.2,
+            max_tokens: options.maxTokens ?? 4096
           })
         });
 
@@ -34,8 +35,23 @@ export async function callLLM(messages, options = {}) {
         }
 
         const data = await response.json();
-        const content = data?.choices?.[0]?.message?.content;
+        const choice = data?.choices?.[0];
+        const content = choice?.message?.content;
         if (!content) throw new Error('LLM response missing content');
+        if (typeof options.onComplete === 'function') {
+          await options.onComplete({
+            finishReason: choice?.finish_reason || '',
+            usage: data?.usage || null,
+            contentLength: content.length
+          });
+        }
+        if (choice?.finish_reason === 'length') {
+          const error = new Error('LLM response hit max_tokens before completion');
+          error.statusCode = 502;
+          error.retryable = true;
+          error.finishReason = choice.finish_reason;
+          throw error;
+        }
         return content;
       } finally {
         clearTimeout(timeout);
@@ -69,6 +85,7 @@ function mockLLM(messages, options = {}) {
   if (
     joined.includes('Markdown 修复助手') ||
     joined.includes('题面补全助手') ||
+    joined.includes('题面重写与补全助手') ||
     joined.includes('题目难度调节助手')
   ) {
     const source = extractSourceHint(joined);
@@ -112,6 +129,7 @@ function sleep(ms) {
 function isRetryableLLMError(error) {
   const status = Number(error?.statusCode || error?.status || 0);
   if (status >= 500 || status === 429) return true;
+  if (error?.retryable) return true;
   const message = String(error?.message || '').toLowerCase();
   if (message.includes('fetch failed')) return true;
   if (message.includes('network') || message.includes('timeout') || message.includes('abort')) return true;

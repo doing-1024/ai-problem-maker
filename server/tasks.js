@@ -83,7 +83,11 @@ export async function generateProblem(workspaceId, payload) {
       ];
       let content = await callLLM(prompt, {
         temperature: 0.3,
+        maxTokens: 8192,
         retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
+        },
         onRetry: async ({ attempt, retries, error }) => {
           emitWorkspaceEvent(workspaceId, 'task:update', {
             stage: 'problem',
@@ -93,7 +97,7 @@ export async function generateProblem(workspaceId, payload) {
           await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
         }
       });
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
+      emitProblemPreview(workspaceId, content);
       if (!looksLikeProblemMarkdown(content)) {
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在修正题面格式' });
         const repairPrompt = [
@@ -107,7 +111,11 @@ export async function generateProblem(workspaceId, payload) {
         content = await callLLM(repairPrompt, {
           temperature: 0.1,
           timeoutMs: 45000,
+          maxTokens: 8192,
           retries: 5,
+          onComplete: async info => {
+            await logLLMComplete(workspaceId, 'problem.log', 'problem repair', info);
+          },
           onRetry: async ({ attempt, retries, error }) => {
             emitWorkspaceEvent(workspaceId, 'task:update', {
               stage: 'problem',
@@ -117,36 +125,9 @@ export async function generateProblem(workspaceId, payload) {
             await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
           }
         });
-        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: content.slice(0, 300) });
+        emitProblemPreview(workspaceId, content);
       }
-      if (!problemHasCompleteMarkdown(content)) {
-        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在补全被截断的题面' });
-        content = await callLLM(
-          [
-            {
-              role: 'system',
-              content:
-                '你是题面补全助手。请根据已有内容重写为完整 Markdown 题面，不得出现省略号或残缺段落。必须包含 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
-            },
-            {
-              role: 'user',
-              content: ['SOURCE_TEXT:', content || '', `用户难度要求: ${difficultyInstruction}`].join('\n')
-            }
-          ],
-          {
-            temperature: 0.1,
-            retries: 5,
-            onRetry: async ({ attempt, retries, error }) => {
-              emitWorkspaceEvent(workspaceId, 'task:update', {
-                stage: 'problem',
-                state: 'running',
-                message: `题面补全重试 ${attempt + 1}/${retries}`
-              });
-              await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] completion retry ${attempt + 1}/${retries}: ${error.message}\n`);
-            }
-          }
-        );
-      }
+      content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction);
       ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
@@ -161,6 +142,75 @@ export async function generateProblem(workspaceId, payload) {
       throw error;
     }
   });
+}
+
+async function completeProblemMarkdown(workspaceId, initialContent, source, difficultyInstruction) {
+  let content = initialContent || '';
+  for (let round = 1; round <= 3; round += 1) {
+    const missing = getProblemMarkdownIssues(content);
+    if (!missing.length) return content;
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'problem',
+      state: 'running',
+      message: `正在补全被截断的题面 ${round}/3`
+    });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] completion round ${round}: ${missing.join(', ')}\n`);
+    content = await callLLM(
+      [
+        {
+          role: 'system',
+          content:
+            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有 ### 样例输入 和 ### 样例输出。'
+        },
+        {
+          role: 'user',
+          content: [
+            `用户难度要求: ${difficultyInstruction}`,
+            `当前问题: ${missing.join('；')}`,
+            '原始题面:',
+            source || '',
+            '上一版输出:',
+            content || ''
+          ].join('\n')
+        }
+      ],
+      {
+        temperature: 0.1,
+        timeoutMs: 90000,
+        maxTokens: 8192,
+        retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', `problem completion ${round}`, info);
+        },
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `题面补全重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] completion retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      }
+    );
+    emitProblemPreview(workspaceId, content);
+  }
+  return content;
+}
+
+function emitProblemPreview(workspaceId, content) {
+  emitWorkspaceEvent(workspaceId, 'task:partial', {
+    stage: 'problem',
+    text: String(content || '').slice(0, 2000)
+  });
+}
+
+async function logLLMComplete(workspaceId, logName, label, info) {
+  const usage = info?.usage ? ` usage=${JSON.stringify(info.usage)}` : '';
+  await appendWorkspaceLog(
+    workspaceId,
+    logName,
+    `[${stamp()}] ${label} finish_reason=${info?.finishReason || 'unknown'} length=${info?.contentLength || 0}${usage}\n`
+  );
 }
 
 export async function generateSolution(workspaceId) {
@@ -503,26 +553,32 @@ function looksLikeProblemMarkdown(text) {
 }
 
 function problemHasCompleteMarkdown(text) {
+  return getProblemMarkdownIssues(text).length === 0;
+}
+
+function getProblemMarkdownIssues(text) {
   const content = String(text || '').trim();
-  if (!content) return false;
-  if (content.length < 180) return false;
-  if (!/^#\s+\S+/m.test(content)) return false;
-  if (!content.includes('## 题意')) return false;
-  if (!content.includes('## 输入格式')) return false;
-  if (!content.includes('## 输出格式')) return false;
-  if (!content.includes('## 样例')) return false;
-  if (!content.includes('### 样例输入')) return false;
-  if (!content.includes('### 样例输出')) return false;
-  if (!content.includes('## 数据范围与提示')) return false;
-  if (/(\.\.\.|……|未完|待补|待续|省略号)/.test(content)) {
-    return false;
-  }
+  const issues = [];
+  if (!content) issues.push('输出为空');
+  if (content.length < 180) issues.push('内容过短，疑似截断');
+  if (!/^#\s+\S+/m.test(content)) issues.push('缺少一级标题');
+  if (!content.includes('## 题意')) issues.push('缺少 ## 题意');
+  if (!content.includes('## 输入格式')) issues.push('缺少 ## 输入格式');
+  if (!content.includes('## 输出格式')) issues.push('缺少 ## 输出格式');
+  if (!content.includes('## 样例')) issues.push('缺少 ## 样例');
+  if (!content.includes('### 样例输入')) issues.push('缺少 ### 样例输入');
+  if (!content.includes('### 样例输出')) issues.push('缺少 ### 样例输出');
+  if (!content.includes('## 数据范围与提示')) issues.push('缺少 ## 数据范围与提示');
+  if (/(\.\.\.|……|未完|待补|待续|省略号)/.test(content)) issues.push('含有省略或待补标记');
   const fenceCount = (content.match(/```/g) || []).length;
-  if (fenceCount % 2 === 1) return false;
+  if (fenceCount % 2 === 1) issues.push('代码块未闭合');
   if (/[\u4e00-\u9fa5A-Za-z0-9]$/.test(content) && /[：:`]$/.test(content)) {
-    return false;
+    issues.push('末尾疑似截断');
   }
-  return !content.endsWith('：') && !content.endsWith('`') && !/等\s*$/.test(content);
+  if (content.endsWith('：') || content.endsWith('`') || /等\s*$/.test(content)) {
+    issues.push('末尾疑似截断');
+  }
+  return Array.from(new Set(issues));
 }
 
 function buildDifficultyInstruction(mode, text) {

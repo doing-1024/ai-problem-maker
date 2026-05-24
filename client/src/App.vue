@@ -18,15 +18,18 @@
       </div>
     </header>
 
-    <main class="layout">
-      <aside class="sidebar">
-        <div class="section">
-          <div class="section-title">当前工作区</div>
-          <div class="workspace-id">{{ workspaceId || '未选择' }}</div>
+    <main class="workspace-layout">
+      <section class="control-pane">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>工作流</h2>
+            <span class="panel-chip">{{ workspaceId ? 'ready' : 'new' }}</span>
+          </div>
+          <div class="workspace-id">{{ workspaceId || '未选择工作区' }}</div>
           <div class="subtitle" v-if="workspaceToken">已绑定访问令牌</div>
         </div>
 
-        <div class="section">
+        <div class="panel">
           <button
             v-for="item in tabs"
             :key="item.key"
@@ -38,7 +41,7 @@
           </button>
         </div>
 
-        <div class="section">
+        <div class="panel">
           <div class="section-title">状态</div>
           <div v-for="(item, key) in status" :key="key" class="status-line">
             <span>{{ key }}</span>
@@ -47,30 +50,6 @@
           <div class="subtitle" v-if="status.problem.message || status.solution.message || status.data.message">
             {{ status.problem.message || status.solution.message || status.data.message }}
           </div>
-        </div>
-
-        <div class="section">
-          <div class="section-title">文件</div>
-          <div v-for="file in files" :key="file" class="file-item" @click="openFile(file)">
-            {{ file }}
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="section-title">日志</div>
-          <div class="file-item" @click="loadLogs">刷新日志</div>
-        </div>
-      </aside>
-
-      <section class="content">
-        <div class="panel live-panel" v-if="liveEvent || liveText">
-          <div class="panel-head">
-            <h2>实时反馈</h2>
-            <span class="panel-chip">stream</span>
-          </div>
-          <div class="live-meta" v-if="liveEvent">{{ liveEvent.stage }} · {{ liveEvent.state || liveEvent.phase }}</div>
-          <div class="live-meta" v-if="activeJobMessage">{{ activeJobMessage }}</div>
-          <pre>{{ liveText }}</pre>
         </div>
 
         <div v-if="errorMessage" class="alert">{{ errorMessage }}</div>
@@ -92,7 +71,6 @@
             <button class="btn primary" @click="saveProblemRaw">保存题面</button>
             <button class="btn" @click="generateProblem" :disabled="!workspaceId">开始改编</button>
           </div>
-          <pre>{{ selectedContent || problemPreview }}</pre>
         </div>
 
         <div v-else-if="tab === 'solution'" class="panel">
@@ -103,7 +81,6 @@
           <div class="row">
             <button class="btn primary" @click="generateSolution" :disabled="!workspaceId">生成题解</button>
           </div>
-          <pre>{{ selectedContent }}</pre>
         </div>
 
         <div v-else class="panel">
@@ -115,15 +92,46 @@
             <button class="btn primary" @click="generateDataPlan" :disabled="!workspaceId">生成数据方案</button>
             <button class="btn" @click="runData" :disabled="!workspaceId">Run</button>
           </div>
-          <pre>{{ selectedContent }}</pre>
         </div>
 
-        <div class="panel" v-if="logsText">
+        <div class="panel">
           <div class="panel-head">
             <h2>日志</h2>
             <span class="panel-chip">activity</span>
           </div>
-          <pre>{{ logsText }}</pre>
+          <button class="btn" @click="loadLogs" :disabled="!workspaceId">刷新日志</button>
+          <pre class="compact-pre" v-if="logsText">{{ logsText }}</pre>
+        </div>
+      </section>
+
+      <section class="file-pane">
+        <div class="panel file-browser">
+          <div class="panel-head">
+            <h2>文件管理</h2>
+            <span class="panel-chip">{{ files.length }} files</span>
+          </div>
+          <div class="file-list">
+            <button
+              v-for="file in files"
+              :key="file"
+              class="file-item"
+              :class="{ active: selectedFile === file }"
+              @click="openFile(file)"
+            >
+              {{ file }}
+            </button>
+          </div>
+        </div>
+
+        <div class="panel file-viewer">
+          <div class="panel-head">
+            <div>
+              <h2>{{ selectedFile || defaultFileName }}</h2>
+              <div class="live-meta" v-if="liveEvent">{{ liveEvent.stage }} · {{ liveEvent.state || liveEvent.phase }} · {{ activeJobMessage }}</div>
+            </div>
+            <span class="panel-chip">{{ livePreview ? 'stream preview' : 'file' }}</span>
+          </div>
+          <pre>{{ selectedContent || problemPreview || '暂无内容' }}</pre>
         </div>
       </section>
     </main>
@@ -131,7 +139,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 const tabs = [
   { key: 'problem', label: '出题' },
@@ -143,6 +151,7 @@ const tab = ref('problem');
 const workspaceId = ref(localStorage.getItem('workspaceId') || '');
 const workspaceToken = ref(localStorage.getItem('workspaceToken') || '');
 const files = ref([]);
+const selectedFile = ref('');
 const selectedContent = ref('');
 const problemRaw = ref('');
 const problemPreview = ref('');
@@ -150,9 +159,9 @@ const difficultyMode = ref('same');
 const difficultyText = ref('');
 const errorMessage = ref('');
 const logsText = ref('');
-const liveText = ref('');
 const liveEvent = ref(null);
 const activeJobMessage = ref('');
+const livePreview = ref(false);
 const status = ref({
   problem: { state: 'idle' },
   solution: { state: 'idle' },
@@ -258,6 +267,8 @@ async function saveProblemRaw() {
 async function generateProblem() {
   errorMessage.value = '';
   try {
+    selectedFile.value = 'problem/problem.md';
+    livePreview.value = true;
     const result = await api(`/api/workspaces/${workspaceId.value}/problem`, {
       method: 'POST',
       body: JSON.stringify({
@@ -266,7 +277,9 @@ async function generateProblem() {
         sourceText: problemRaw.value
       })
     });
+    selectedFile.value = result.path || 'problem/problem.md';
     selectedContent.value = result.content;
+    livePreview.value = false;
     if (result.cached) {
       errorMessage.value = '题目已命中缓存';
     }
@@ -278,8 +291,11 @@ async function generateProblem() {
 
 async function generateSolution() {
   errorMessage.value = '';
+  selectedFile.value = 'solution/solution.md';
+  livePreview.value = true;
   const result = await api(`/api/workspaces/${workspaceId.value}/solution`, { method: 'POST' });
   selectedContent.value = result.markdown;
+  livePreview.value = false;
   if (result.cached) {
     errorMessage.value = '题解已命中缓存';
   }
@@ -288,8 +304,11 @@ async function generateSolution() {
 
 async function generateDataPlan() {
   errorMessage.value = '';
+  selectedFile.value = 'data/hack_plan.md';
+  livePreview.value = true;
   const result = await api(`/api/workspaces/${workspaceId.value}/data/plan`, { method: 'POST' });
   selectedContent.value = result.plan;
+  livePreview.value = false;
   if (result.cached) {
     errorMessage.value = '数据方案已命中缓存';
   }
@@ -299,8 +318,11 @@ async function generateDataPlan() {
 async function runData() {
   errorMessage.value = '';
   try {
+    selectedFile.value = 'data/datas.zip';
+    livePreview.value = true;
     const result = await api(`/api/workspaces/${workspaceId.value}/data/run`, { method: 'POST' });
     selectedContent.value = JSON.stringify(result, null, 2);
+    livePreview.value = false;
     if (result.cached) {
       errorMessage.value = '数据包已命中缓存';
     }
@@ -320,7 +342,9 @@ async function openFile(file) {
     });
     const text = await res.text();
     if (!res.ok) throw new Error(text || 'open failed');
+    selectedFile.value = file;
     selectedContent.value = text;
+    livePreview.value = false;
   } catch (error) {
     errorMessage.value = error.message;
   }
@@ -352,6 +376,24 @@ onMounted(async () => {
 });
 
 let eventSource = null;
+const defaultFileName = computed(() => fileForTab(tab.value));
+
+function fileForTab(key) {
+  if (key === 'solution') return 'solution/solution.md';
+  if (key === 'data') return 'data/hack_plan.md';
+  return 'problem/problem.md';
+}
+
+function fileForEvent(data) {
+  if (data.stage === 'solution') return data.phase === 'final' ? 'solution/solution.md' : 'solution/solution.md';
+  if (data.stage === 'data') {
+    if (data.phase === 'gen') return 'data/gen.py';
+    if (data.phase === 'run') return 'data/datas.zip';
+    return 'data/hack_plan.md';
+  }
+  return 'problem/problem.md';
+}
+
 function connectLiveFeed() {
   if (!workspaceId.value || !workspaceToken.value) return;
   if (eventSource) eventSource.close();
@@ -373,10 +415,15 @@ function connectLiveFeed() {
   eventSource.addEventListener('task:partial', ev => {
     const data = JSON.parse(ev.data);
     liveEvent.value = data;
-    liveText.value = data.text || '';
+    const text = data.text || '';
+    selectedFile.value = fileForEvent(data);
+    selectedContent.value = text ? `${text}\n\n[实时预览 ${text.length} 字，完整文件以最终生成结果为准]` : '';
+    livePreview.value = true;
   });
   eventSource.onerror = () => {
-    liveText.value = liveText.value || 'stream disconnected, retrying...';
+    if (!selectedContent.value) {
+      selectedContent.value = 'stream disconnected, retrying...';
+    }
   };
 }
 </script>
