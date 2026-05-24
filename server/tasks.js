@@ -17,6 +17,43 @@ function hashText(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
+const DIFFICULTY_TAXONOMY = `
+难度由以下几个因素共同决定，没有固定的算法→难度映射：
+1. 思维链深度：从读题到出解需要几步转化？是直接套模板，还是需要关键观察/构造/转化？
+2. 复合程度：单一算法 vs. 多种算法复合 vs. 算法嵌套（如数据结构上跑DP）
+3. 建模难度：题目条件是否能直接对应到已知模型，还是需要转化建模？
+4. 实现复杂度：边界情况数量、讨论分支数、代码长度
+5. 隐蔽条件：是否有容易忽略的限制或特殊情况？
+
+举例：
+- n=20 但需要折半搜索/状压DP → 可能是 NOIP T4/省选难度（思维链深）
+- n=2e5 树状数组求逆序对 → 可能是 NOIP T1（直接套模板，思维链浅）
+- n=5000, O(n²) 区间DP → 可能是 NOIP T2/T3（思维链中等，实现稍复杂）
+- n=1e5 线段树求区间和 → 可能是 CSP-J T4（直接应用，思维链浅）
+
+核心原则：难度不取决于数据范围或算法名称，而取决于选手解决问题所需的思维深度和综合能力。
+`;
+
+const FEW_SHOT_EXAMPLE = `
+
+【改编示例1 - 同难度改背景】
+原题：给定 n 个正整数 a[i]，求所有数的和（入门/模拟）。
+改编：【矩阵求和】给定 n 行 m 列的矩阵，求每一行的元素之和，并输出所有行和的最大值行号。
+——同是求和/模拟，思维链深度相同，但背景从一维数组改为二维矩阵，关键词全部更换。
+
+【改编示例2 - 提升难度（浅→中，增加思维链深度）】
+原题：给定 n 个正整数，求最大值和最小值的差。（CSP-J T1，O(n) 扫描，思维链深度 1）
+改编：给定 n 个整数 a[i] 和 q 次询问，每次询问区间 [l,r] 的最大值与最小值的差。
+要求选手发现：需要先转化为区间最值查询问题，再选择 ST 表/线段树，复杂度 O(n log n + q)。
+——思维链从 1 步（扫描比较）变成 3 步（识别问题模型→选择数据结构→实现查询），难度从 CSP-J 升级到 NOIP。
+
+【改编示例3 - 提升难度（中→高，增加复合度）】
+原题：给定 n 个节点 m 条边的无向图，求从 1 到 n 的最短路（Dijkstra，NOIP T2）。
+改编：给定 n 个节点 m 条边的无向图，每条边有长度和费用两种权值。在总费用不超过预算 K 的前提下，求从 1 到 n 的最短路径。
+要求选手发现：这不能直接用最短路算法，需要拆点/分层图最短路或 DP 套最短路。
+——从单一算法升级为分层图最短路（复合思维：最短路 + DP/拆点），思维链深度和复合程度都显著提升。
+`;
+
 async function setState(workspaceId, stage, state, message) {
   await updateWorkspaceMeta(workspaceId, {
     currentStep: stage,
@@ -68,8 +105,27 @@ export async function generateProblem(workspaceId, payload) {
       const prompt = [
         {
           role: 'system',
-          content:
-            '你是资深 OI 题目设计师。你要根据用户给出的原题素材重新设计一道 OI 题。用户指定的目标难度必须严格遵守，不得擅自降级，例如用户要求 NOIP T1 时不能写成 CSP-J T1 或入门题。改编时必须保持原题的基础算法范式一致：原题如果核心是 DP，就仍应是 DP，可以升级为区间 DP、树形 DP、状态 DP、DP 套 DP 等；原题如果是图论，就仍应是图论；不要把 DP 改成 BFS/贪心/模拟，也不要跨到完全无关算法。可以大幅改换背景、故事、对象、题名和变量语义，让选手难以通过题面关键词直接搜到原题。输出必须是完整 Markdown 题面，结构固定为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。不得省略任何一节。标记为 PROBLEM_REWRITE。'
+          content: [
+            '你是资深 OI 题目设计师。你要根据用户给出的原题素材重新设计一道 OI 题。',
+            '',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '用户指定的目标难度必须严格遵守。关键是保证思维链深度、复合度和实现复杂度与目标匹配，而不是只看数据范围或算法名字。不得擅自降级——要求 NOIP 级别就不能写出思维链深度明显是入门级的题目。',
+            '',
+            '算法范式改编策略：',
+            '- 同难度改编（mode=same）：保持原题基础算法范式一致，只改背景、故事、题名、变量名，让选手无法通过关键词搜到原题。原题是 DP 就仍是 DP，图论就仍是图论。',
+            '- 提升难度改编（mode=custom）：可以在同一算法谱系内升级（如简单DP→区间DP→树形DP→DP套DP）。必要时经审慎分析可升级到更高阶算法范式。注意只能升级不能降级——不要把 DP 改成 BFS/贪心/纯模拟，但可以把 BFS/贪心升级为 DP。',
+            '',
+            '输出必须是完整 Markdown 题面，结构固定为：',
+            '# 标题',
+            '## 题意',
+            '## 输入格式',
+            '## 输出格式',
+            '## 样例',
+            '## 数据范围与提示',
+            '不得省略任何一节。标记为 PROBLEM_REWRITE。',
+            '',
+            `改编示例：${FEW_SHOT_EXAMPLE}`
+          ].join('\n')
         },
         {
           role: 'user',
@@ -79,6 +135,8 @@ export async function generateProblem(workspaceId, payload) {
             `难度说明: ${payload.difficultyText || ''}`,
             `用户难度要求: ${difficultyInstruction}`,
             `改编策略: ${adaptationInstruction}`,
+            `难度分级参考：`,
+            DIFFICULTY_TAXONOMY,
             'SOURCE_TEXT:',
             source || ''
           ].join('\n')
@@ -106,10 +164,22 @@ export async function generateProblem(workspaceId, payload) {
         const repairPrompt = [
           {
             role: 'system',
-            content:
-              '你是 Markdown 题面修复助手。优先修正文结构和补齐缺失段落；如果原输出明显只是轻微改名、没有满足用户难度要求，可以顺手重写题目核心。必须输出完整题面，且补齐 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
+            content: [
+              '你是 Markdown 题面修复助手。优先修正文结构和补齐缺失段落；如果原输出明显只是轻微改名、没有满足用户难度要求，可以顺手重写题目核心。',
+              `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+              '算法范式策略：同难度则保持原范式，提升难度可在同一谱系内升级或审慎升级范式，但不能降级。',
+              '必须输出完整题面，且补齐 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。'
+            ].join('\n')
           },
-          { role: 'user', content: ['SOURCE_TEXT:', content || ''].join('\n') }
+          {
+            role: 'user',
+            content: [
+              'SOURCE_TEXT:',
+              content || '',
+              `难度要求: ${difficultyInstruction}`,
+              `改编策略: ${adaptationInstruction}`
+            ].join('\n')
+          }
         ];
         content = await callLLM(repairPrompt, {
           temperature: 0.1,
@@ -135,6 +205,13 @@ export async function generateProblem(workspaceId, payload) {
       ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
+      await updateWorkspaceMeta(workspaceId, {
+        difficulty: {
+          mode: difficultyMode,
+          text: payload.difficultyText || '',
+          instruction: difficultyInstruction
+        }
+      });
       await setState(workspaceId, 'problem', 'done', '题目已生成');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'done', message: '题目已生成' });
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] done\n`);
@@ -160,8 +237,15 @@ async function reviewAndReviseProblem(workspaceId, initialContent, source, diffi
       [
         {
           role: 'system',
-          content:
-            '你是严格的 OI 出题审稿员。只判断题目是否满足要求，不要迎合。必须检查：1. 是否严格命中用户目标难度，尤其 NOIP T1 不能降成 CSP-J T1；2. 是否保持原题基础算法范式，例如 DP 仍是 DP、图论仍是图论，不能改成 BFS/贪心/纯模拟等无关算法；3. 是否只是改题名或背景而没有实质改编。输出第一行只能是 PASS 或 FAIL，后面用简短中文列出理由和必须修改点。标记为 PROBLEM_REVIEW。'
+          content: [
+            '你是严格的 OI 出题审稿员。只判断题目是否满足要求，不要迎合。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '必须检查：',
+            '1. 是否严格命中用户目标难度——关键是思维链深度、复合程度、建模难度是否对齐目标级别，而非仅看数据范围或算法名字；',
+            '2. 算法范式是否合理：同难度改编不应改变算法范式；提升难度改编应升级算法（如同难度的 BFS→BFS，但提升难度可以 BFS→DP），不能降级；',
+            '3. 是否只是改题名或背景而没有实质改编。',
+            '输出第一行只能是 PASS 或 FAIL，后面用简短中文列出理由和必须修改点。标记为 PROBLEM_REVIEW。'
+          ].join('\n')
         },
         {
           role: 'user',
@@ -208,8 +292,12 @@ async function reviewAndReviseProblem(workspaceId, initialContent, source, diffi
       [
         {
           role: 'system',
-          content:
-            '你是资深 OI 题目修订员。根据审稿意见重写题面。必须严格命中用户目标难度，不得降档；必须保持原题基础算法范式一致，只能在同一算法谱系内调整难度；同时可以大幅重写背景和叙事。只输出完整 Markdown 题面，结构为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。标记为 PROBLEM_REVISE。'
+          content: [
+            '你是资深 OI 题目修订员。根据审稿意见重写题面。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '必须严格命中用户目标难度，不得降档；同难度则保持算法范式一致；提升难度可在原谱系内升级或审慎升级范式。大幅重写背景和叙事。',
+            '只输出完整 Markdown 题面，结构为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。标记为 PROBLEM_REVISE。'
+          ].join('\n')
         },
         {
           role: 'user',
@@ -265,8 +353,12 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
       [
         {
           role: 'system',
-          content:
-            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。用户目标难度必须严格遵守，不得降成更低档；同时保持原题基础算法范式一致，只允许在同一算法谱系内升级或降级。必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
+          content: [
+            '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '用户目标难度必须严格遵守，不得降成更低档；同难度则保持算法范式一致；提升难度可在原谱系内升级或审慎升级范式。',
+            '必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
+          ].join('\n')
         },
         {
           role: 'user',
@@ -339,12 +431,28 @@ export async function generateSolution(workspaceId) {
         };
       }
 
+      const diffCtx = meta?.difficulty || {};
+      const diffInfo = diffCtx.instruction
+        ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
+        : '';
+
       await setState(workspaceId, 'solution', 'running', '正在生成题解');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'running', message: '正在生成题解' });
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start solution generation\n`);
       const draftPrompt = [
-        { role: 'system', content: '你是资深 OI 题解助手。先输出初稿。标记为 SOLUTION_DRAFT。' },
-        { role: 'user', content: ['SOLUTION_DRAFT', 'SOURCE_TEXT:', problem || ''].join('\n') }
+        {
+          role: 'system',
+          content: [
+            '你是资深 OI 题解助手。先输出初稿。标记为 SOLUTION_DRAFT。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '题解的算法、复杂度分析应与目标难度匹配，体现相应深度。',
+            '必须包含 ## 思路、## 正确性、## 复杂度 三个章节，最后给出 C++ 标程（```cpp 代码块）。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: ['SOLUTION_DRAFT', diffInfo, 'SOURCE_TEXT:', problem || ''].filter(Boolean).join('\n')
+        }
       ];
       const draft = await callLLM(draftPrompt, {
         temperature: 0.2,
@@ -361,8 +469,17 @@ export async function generateSolution(workspaceId) {
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'draft', text: draft.slice(0, 320) });
 
       const critiquePrompt = [
-        { role: 'system', content: '你是严厉的 OI 题解审校员，只找错误，不写空话。标记为 SOLUTION_CRITIC。' },
-        { role: 'user', content: ['SOLUTION_CRITIC', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || ''].join('\n') }
+        {
+          role: 'system',
+          content: [
+            '你是严厉的 OI 题解审校员，只找错误，不写空话。标记为 SOLUTION_CRITIC。',
+            '检查：算法是否正确、复杂度分析是否对齐目标难度、代码是否包含明显错误。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: ['SOLUTION_CRITIC', diffInfo, 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || ''].filter(Boolean).join('\n')
+        }
       ];
       const critique = await callLLM(critiquePrompt, {
         temperature: 0.1,
@@ -379,10 +496,17 @@ export async function generateSolution(workspaceId) {
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'critic', text: critique.slice(0, 320) });
 
       const revisePrompt = [
-        { role: 'system', content: '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。' },
+        {
+          role: 'system',
+          content: [
+            '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '算法分析、复杂度推导必须与目标难度匹配，注意思维链深度要对齐。'
+          ].join('\n')
+        },
         {
           role: 'user',
-          content: ['SOLUTION_FINAL', 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || '', 'CRITIQUE:', critique || ''].join('\n')
+          content: ['SOLUTION_FINAL', diffInfo, 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || '', 'CRITIQUE:', critique || ''].filter(Boolean).join('\n')
         }
       ];
       const finalText = await callLLM(revisePrompt, {
@@ -440,12 +564,24 @@ export async function generateDataPlan(workspaceId) {
         };
       }
 
+      const diffCtx = meta?.difficulty || {};
+      const diffInfo = diffCtx.instruction
+        ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
+        : '';
+
       await setState(workspaceId, 'data', 'running', '正在生成数据方案');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在生成数据方案' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start data planning\n`);
       const planPrompt = [
-        { role: 'system', content: '你是资深 OI 数据构造助手。标记为 DATA_PLAN。' },
-        { role: 'user', content: ['DATA_PLAN', 'SOURCE_TEXT:', solution || ''].join('\n') }
+        {
+          role: 'system',
+          content: [
+            '你是资深 OI 数据构造助手。标记为 DATA_PLAN。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '数据范围、测试点规模必须对齐目标难度。'
+          ].join('\n')
+        },
+        { role: 'user', content: ['DATA_PLAN', diffInfo, 'SOURCE_TEXT:', solution || ''].filter(Boolean).join('\n') }
       ];
       const plan = await callLLM(planPrompt, {
         temperature: 0.2,
@@ -464,8 +600,15 @@ export async function generateDataPlan(workspaceId) {
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
 
       const genPrompt = [
-        { role: 'system', content: '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。' },
-        { role: 'user', content: ['GEN_PY', 'SOURCE_TEXT:', plan || ''].join('\n') }
+        {
+          role: 'system',
+          content: [
+            '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '生成数据的规模必须对齐目标难度。'
+          ].join('\n')
+        },
+        { role: 'user', content: ['GEN_PY', diffInfo, 'SOURCE_TEXT:', plan || ''].filter(Boolean).join('\n') }
       ];
       const genPy = await callLLM(genPrompt, {
         temperature: 0.2,
@@ -707,9 +850,9 @@ function buildDifficultyInstruction(mode, text) {
 
 function buildAdaptationInstruction(mode) {
   if (String(mode || 'same') === 'same') {
-    return '参考原题难度与算法量级，并保持原题基础算法范式一致；同时必须尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
+    return '同难度改编：参考原题难度与算法量级，保持原题基础算法范式一致；同时尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
   }
-  return '按用户输入的目标难度设计，目标难度必须严格命中；保持原题基础算法范式一致，可以在同一算法谱系内加强或弱化，例如普通 DP 可改为更复杂 DP，但不能改成 BFS、贪心、纯模拟等无关算法。背景、变量和叙事可以大幅重写。';
+  return '提升难度改编：按用户输入的目标难度设计，目标难度必须严格命中；算法范式可在原谱系内升级（如普通DP→树形DP），必要时可审慎升级到更高阶范式（如BFS/贪心→DP）。不能降级。背景、变量和叙事可以大幅重写。';
 }
 
 function ensureProblemMarkdownStructure(text) {
