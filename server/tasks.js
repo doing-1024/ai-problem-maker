@@ -581,12 +581,13 @@ export async function generateDataPlan(workspaceId) {
           content: [
             '你是资深 OI 数据构造助手。标记为 DATA_PLAN。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-            '数据范围、测试点规模必须对齐目标难度。'
+            '数据范围、测试点规模必须对齐目标难度。',
+            '输出必须是 Markdown，严格包含 # 数据方案 和 ## 点数分布。'
           ].join('\n')
         },
         { role: 'user', content: ['DATA_PLAN', diffInfo, 'SOURCE_TEXT:', solution || ''].filter(Boolean).join('\n') }
       ];
-      const plan = await callLLM(planPrompt, {
+      let plan = await callLLM(planPrompt, {
         temperature: 0.2,
         retries: 5,
         onRetry: async ({ attempt, retries, error }) => {
@@ -599,7 +600,8 @@ export async function generateDataPlan(workspaceId) {
         }
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan.slice(0, 320) });
-      ensureMarkdownStructure(plan, ['title', '## 点数分布']);
+      plan = await repairDataPlanOutput(workspaceId, plan, solution, diffInfo);
+      ensureDataPlanMarkdownStructure(plan);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
 
       const genPrompt = [
@@ -939,6 +941,74 @@ async function repairSolutionOutput(workspaceId, finalText, problem, diffInfo) {
 
 function ensureSolutionMarkdownStructure(text) {
   ensureMarkdownStructure(text, ['title', '## 思路', '## 正确性', '## 复杂度']);
+}
+
+async function repairDataPlanOutput(workspaceId, plan, solution, diffInfo) {
+  const text = String(plan || '');
+  const missing = [];
+  if (!text.trim()) missing.push('缺少数据方案 Markdown');
+  if (!/^#\s+\S+/m.test(text)) missing.push('缺少一级标题');
+  if (!text.includes('## 点数分布')) missing.push('缺少 ## 点数分布');
+  if (!missing.length) return plan;
+
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'data',
+    state: 'running',
+    message: '正在修正数据方案格式'
+  });
+  await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] repair data plan: ${missing.join(', ')}\n`);
+
+  const repaired = await callLLM(
+    [
+      {
+        role: 'system',
+        content: [
+          '你是 OI 数据方案格式修复助手。必须保留数据构造意图，修复 Markdown 结构。',
+          `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+          '只输出最终数据方案，不要解释。',
+          '输出格式必须严格包含：',
+          '# 数据方案',
+          '## 点数分布',
+          '在 ## 点数分布 下列出各测试点/测试组比例、规模、构造目的和边界覆盖。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'DATA_PLAN_REPAIR',
+          diffInfo,
+          `当前问题: ${missing.join('；')}`,
+          '题解:',
+          solution || '',
+          '待修复数据方案:',
+          plan || ''
+        ].filter(Boolean).join('\n')
+      }
+    ],
+    {
+      temperature: 0.05,
+      timeoutMs: 90000,
+      maxTokens: 8192,
+      retries: 5,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'data.log', 'data plan repair', info);
+      },
+      onRetry: async ({ attempt, retries, error }) => {
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'data',
+          state: 'running',
+          message: `数据方案格式修复重试 ${attempt + 1}/${retries}`
+        });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] plan repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
+      }
+    }
+  );
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan-repair', text: repaired.slice(0, 320) });
+  return repaired;
+}
+
+function ensureDataPlanMarkdownStructure(text) {
+  ensureMarkdownStructure(text, ['title', '## 点数分布']);
 }
 
 async function verifyCppCompiles(workspaceId, cpp) {
