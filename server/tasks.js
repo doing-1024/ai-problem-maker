@@ -501,7 +501,9 @@ export async function generateSolution(workspaceId) {
           content: [
             '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-            '算法分析、复杂度推导必须与目标难度匹配，注意思维链深度要对齐。'
+            '算法分析、复杂度推导必须与目标难度匹配，注意思维链深度要对齐。',
+            '输出必须严格包含中文 Markdown 章节：# 题解、## 思路、## 正确性、## 复杂度。',
+            '最后必须包含一个 ```cpp 代码块，代码块内是完整 C++17 标程。'
           ].join('\n')
         },
         {
@@ -522,9 +524,10 @@ export async function generateSolution(workspaceId) {
         }
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
-      const cpp = extractCodeBlock(finalText, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
-      const markdown = stripCppBlock(finalText);
-      ensureMarkdownStructure(markdown, ['title', '## 思路', '## 正确性', '## 复杂度']);
+      const repaired = await repairSolutionOutput(workspaceId, finalText, problem, diffInfo);
+      const cpp = extractCodeBlock(repaired, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
+      const markdown = stripCppBlock(repaired);
+      ensureSolutionMarkdownStructure(markdown);
       assertSolutionTextLooksReasonable(markdown, cpp);
       await verifyCppCompiles(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
@@ -862,6 +865,80 @@ function ensureProblemMarkdownStructure(text) {
     error.statusCode = 422;
     throw error;
   }
+}
+
+async function repairSolutionOutput(workspaceId, finalText, problem, diffInfo) {
+  const requiredHeaders = ['## 思路', '## 正确性', '## 复杂度'];
+  const markdown = stripCppBlock(finalText);
+  const cpp = extractCodeBlock(finalText, 'cpp');
+  const missing = requiredHeaders.filter(header => !markdown.includes(header));
+  if (!markdown.trim()) missing.push('缺少题解 Markdown');
+  if (!/^#\s+\S+/m.test(markdown)) missing.push('缺少一级标题');
+  if (!cpp) missing.push('缺少 C++ 标程代码块');
+  if (!missing.length) return finalText;
+
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'solution',
+    state: 'running',
+    message: '正在修正题解格式'
+  });
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] repair solution: ${missing.join(', ')}\n`);
+
+  const repaired = await callLLM(
+    [
+      {
+        role: 'system',
+        content: [
+          '你是 OI 题解格式修复助手。必须保留正确算法含义，修复 Markdown 结构和 C++ 标程代码块。',
+          `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+          '只输出最终结果，不要解释。',
+          '输出格式必须严格为：',
+          '# 题解',
+          '## 思路',
+          '## 正确性',
+          '## 复杂度',
+          '```cpp',
+          '完整 C++17 标程',
+          '```'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'SOLUTION_REPAIR',
+          diffInfo,
+          `当前问题: ${missing.join('；')}`,
+          '题目:',
+          problem || '',
+          '待修复输出:',
+          finalText || ''
+        ].filter(Boolean).join('\n')
+      }
+    ],
+    {
+      temperature: 0.05,
+      timeoutMs: 90000,
+      maxTokens: 8192,
+      retries: 5,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'solution.log', 'solution repair', info);
+      },
+      onRetry: async ({ attempt, retries, error }) => {
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'solution',
+          state: 'running',
+          message: `题解格式修复重试 ${attempt + 1}/${retries}`
+        });
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
+      }
+    }
+  );
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'repair', text: repaired.slice(0, 320) });
+  return repaired;
+}
+
+function ensureSolutionMarkdownStructure(text) {
+  ensureMarkdownStructure(text, ['title', '## 思路', '## 正确性', '## 复杂度']);
 }
 
 async function verifyCppCompiles(workspaceId, cpp) {
