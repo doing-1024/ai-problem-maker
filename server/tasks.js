@@ -947,7 +947,13 @@ function runCommand(command, args, timeoutMs) {
     child.stderr.on('data', chunk => {
       stderr += chunk.toString();
     });
-    child.on('error', reject);
+    child.on('error', error => {
+      if (error?.code === 'ENOENT') {
+        reject(new Error(`${command} not found. Please install ${command} in the runtime environment.`));
+        return;
+      }
+      reject(error);
+    });
     child.on('close', code => {
       clearTimeout(timer);
       if (code !== 0) {
