@@ -59,15 +59,8 @@
           <span>{{ activeJobMessage }}</span>
         </div>
 
-        <textarea
-          v-if="editorIsText"
-          v-model="editorContent"
-          class="code-editor"
-          spellcheck="false"
-          :readonly="!canEditSelected || livePreview"
-          :placeholder="workspaceId ? '选择或生成一个文件' : '先新建工作区'"
-        ></textarea>
-        <pre v-else class="binary-viewer">{{ selectedContent || '该文件不适合直接文本编辑，请下载整包查看。' }}</pre>
+        <div v-show="editorIsText" ref="editorHost" class="code-editor"></div>
+        <pre v-show="!editorIsText" class="binary-viewer">{{ selectedContent || '该文件不适合直接文本编辑，请下载整包查看。' }}</pre>
 
         <div v-if="errorMessage" class="status-message error">{{ errorMessage }}</div>
         <div v-if="successMessage" class="status-message ok">{{ successMessage }}</div>
@@ -141,7 +134,19 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import 'monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution';
+import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
+import 'monaco-editor/esm/vs/basic-languages/python/python.contribution';
+import 'monaco-editor/esm/vs/language/json/monaco.contribution';
+import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+
+self.MonacoEnvironment = {
+  getWorker() {
+    return new editorWorker();
+  }
+};
 
 const workspaceId = ref(localStorage.getItem('workspaceId') || '');
 const workspaceToken = ref(localStorage.getItem('workspaceToken') || '');
@@ -149,6 +154,7 @@ const files = ref([]);
 const selectedFile = ref('');
 const selectedContent = ref('');
 const editorContent = ref('');
+const editorHost = ref(null);
 const problemRaw = ref('');
 const difficultyMode = ref('same');
 const difficultyText = ref('');
@@ -165,6 +171,9 @@ const status = ref({
 });
 
 let eventSource = null;
+let monacoEditor = null;
+let monacoChangeSubscription = null;
+let settingEditorValue = false;
 
 const writableFiles = new Set([
   'input/problem_raw.md',
@@ -459,6 +468,61 @@ function setEditorResult(file, content) {
   livePreview.value = false;
 }
 
+function createMonacoEditor() {
+  if (!editorHost.value || monacoEditor) return;
+  monacoEditor = monaco.editor.create(editorHost.value, {
+    value: editorContent.value,
+    language: editorLanguage(selectedFile.value),
+    theme: 'vs-dark',
+    automaticLayout: true,
+    minimap: { enabled: false },
+    scrollBeyondLastLine: false,
+    fontFamily: "Consolas, 'SFMono-Regular', Menlo, Monaco, monospace",
+    fontSize: 13,
+    lineHeight: 21,
+    tabSize: 2,
+    wordWrap: 'on',
+    readOnly: editorReadOnly(),
+    renderWhitespace: 'selection',
+    fixedOverflowWidgets: true,
+    padding: { top: 14, bottom: 14 }
+  });
+  monacoChangeSubscription = monacoEditor.onDidChangeModelContent(() => {
+    if (settingEditorValue) return;
+    editorContent.value = monacoEditor.getValue();
+  });
+}
+
+function syncMonacoValue(value) {
+  if (!monacoEditor || monacoEditor.getValue() === value) return;
+  settingEditorValue = true;
+  monacoEditor.setValue(value);
+  settingEditorValue = false;
+}
+
+function syncMonacoOptions() {
+  if (!monacoEditor) return;
+  const model = monacoEditor.getModel();
+  if (model) {
+    monaco.editor.setModelLanguage(model, editorLanguage(selectedFile.value));
+  }
+  monacoEditor.updateOptions({ readOnly: editorReadOnly() });
+  nextTick(() => monacoEditor?.layout());
+}
+
+function editorReadOnly() {
+  return !canEditSelected.value || livePreview.value || !editorIsText.value;
+}
+
+function editorLanguage(file) {
+  if (file.endsWith('.md')) return 'markdown';
+  if (file.endsWith('.cpp') || file.endsWith('.cc') || file.endsWith('.h')) return 'cpp';
+  if (file.endsWith('.py')) return 'python';
+  if (file.endsWith('.json')) return 'json';
+  if (file.endsWith('.log')) return 'plaintext';
+  return 'plaintext';
+}
+
 function clearMessages() {
   errorMessage.value = '';
   successMessage.value = '';
@@ -521,6 +585,8 @@ function connectLiveFeed() {
 }
 
 onMounted(async () => {
+  await nextTick();
+  createMonacoEditor();
   if (!workspaceId.value || !workspaceToken.value) return;
   try {
     connectLiveFeed();
@@ -528,5 +594,19 @@ onMounted(async () => {
   } catch (error) {
     errorMessage.value = error.message;
   }
+});
+
+watch(editorContent, value => {
+  syncMonacoValue(value);
+});
+
+watch([selectedFile, canEditSelected, livePreview, editorIsText], () => {
+  syncMonacoOptions();
+});
+
+onBeforeUnmount(() => {
+  if (eventSource) eventSource.close();
+  monacoChangeSubscription?.dispose();
+  monacoEditor?.dispose();
 });
 </script>

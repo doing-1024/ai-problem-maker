@@ -10,7 +10,15 @@ export default defineConfig({
   root: __dirname,
   build: {
     outDir: path.resolve(__dirname, '../dist'),
-    emptyOutDir: true
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 4096,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/monaco-editor')) return 'monaco';
+        }
+      }
+    }
   },
   server: {
     proxy: {

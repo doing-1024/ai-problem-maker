@@ -262,10 +262,8 @@ button {
   height: 100%;
   min-height: 0;
   margin: 0;
-  padding: 14px 16px;
   border: 0;
   outline: 0;
-  resize: none;
   background: var(--editor);
   color: var(--text);
   line-height: 1.55;
@@ -273,17 +271,23 @@ button {
   tab-size: 2;
 }
 
-.code-editor[readonly] {
-  color: #bbbbbb;
+.code-editor {
+  overflow: hidden;
 }
 
-.code-editor::selection,
+.code-editor .monaco-editor,
+.code-editor .monaco-editor-background,
+.code-editor .monaco-editor .inputarea.ime-input {
+  background: var(--editor);
+}
+
 .binary-viewer::selection,
 .log-view::selection {
   background: #264f78;
 }
 
 .binary-viewer {
+  padding: 14px 16px;
   white-space: pre-wrap;
   overflow: auto;
 }
