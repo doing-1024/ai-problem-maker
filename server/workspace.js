@@ -208,10 +208,50 @@ export async function listWorkspaceFiles(id) {
 export async function downloadWorkspaceZip(id) {
   const root = workspaceDir(id);
   if (!(await exists(root))) throw new Error('workspace not found');
+
+  const readme = [
+    '# ASOI 竞赛题数据包',
+    '',
+    '## 文件说明',
+    '',
+    '### 题目相关',
+    '',
+    '- `input/problem_raw.md` — **原题素材**，你提交给 AI 的原始题目，供参考对比。',
+    '- `problem/problem.md` — **最终题面**，AI 改编后生成的新竞赛题 Markdown，可直接用于比赛或练习。',
+    '',
+    '### 题解与标程',
+    '',
+    '- `solution/solution.md` — **题解**，包含解题思路、正确性证明和复杂度分析。',
+    '- `solution/std.cpp` — **C++ 标准程序**（标程），用于对拍或评测。',
+    '',
+    '### 数据相关',
+    '',
+    '- `data/hack_plan.md` — **数据构造方案**，说明各测试点的规模、边界条件和构造目的。',
+    '- `data/gen.py` — **数据生成器**，Python 脚本，可根据题面随机生成测试数据。',
+    '- `data/datas.zip` — **测试数据压缩包**，包含所有测试点的输入（`.in`）和输出（`.out`）文件，可直接用于评测。',
+    '',
+    '### 其他',
+    '',
+    '- `logs/` — AI 生成过程日志，便于排查问题。',
+    '- `meta.json` — 工作区元数据，包含状态和生成时间等。',
+    '',
+    '## 使用建议',
+    '',
+    '1. 比赛发布：使用 `problem/problem.md` 作为题面，`data/datas.zip` 中的数据进行评测。',
+    '2. 练习自测：用 `data/gen.py` 生成随机数据，配合 `solution/std.cpp` 对拍。',
+    '3. 学习参考：阅读 `solution/solution.md` 了解解题思路。',
+    '',
+  ].join('\n');
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-readme-`));
+  const readmePath = path.join(tmpDir, 'README.md');
+  await fs.writeFile(readmePath, readme, 'utf8');
+
   const zipPath = path.join(os.tmpdir(), `${id}.zip`);
   try {
     await fs.unlink(zipPath);
   } catch {}
+
   await new Promise((resolve, reject) => {
     const output = createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
@@ -220,8 +260,11 @@ export async function downloadWorkspaceZip(id) {
     archive.on('error', reject);
     archive.pipe(output);
     archive.directory(root, false);
+    archive.file(readmePath, { name: 'README.md' });
     archive.finalize();
   });
+
+  await fs.rm(tmpDir, { recursive: true, force: true });
   return zipPath;
 }
 
