@@ -727,24 +727,44 @@ print("ZIP_END")
   const zipHex = extractBetween(result.stdout, 'ZIP_BEGIN', 'ZIP_END').trim();
   await fs.rm(workDir, { recursive: true, force: true });
   if (!zipHex) {
-    const error = new Error(`generator failed: ${result.stderr || 'no zip produced'}`);
+    const runnerStdout = extractBetween(result.stdout, 'STDOUT_BEGIN', 'STDOUT_END') || result.stdout;
+    const error = new Error(
+      `generator failed: no ZIP produced. ` +
+      `runner stderr: ${result.stderr || '(empty)'}; ` +
+      `runner stdout: ${runnerStdout.slice(0, 500)}`
+    );
+    error.statusCode = 500;
+    throw error;
+  }
+  const zipContent = Buffer.from(zipHex, 'hex');
+  try {
+    assertDataZipLooksValid(zipContent);
+  } catch (e) {
+    const error = new Error(`invalid ZIP produced: ${e.message}`);
     error.statusCode = 500;
     throw error;
   }
   return {
     stdout: extractBetween(result.stdout, 'STDOUT_BEGIN', 'STDOUT_END'),
     stderr: extractBetween(result.stdout, 'STDERR_BEGIN', 'STDERR_END'),
-    zipContent: Buffer.from(zipHex, 'hex')
+    zipContent
   };
 }
 
 function runPython(code, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
-    const child = spawn('python3', ['-c', code], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('python3', ['-c', code], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true
+    });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
       reject(new Error('python timeout'));
     }, timeoutMs);
     child.stdout.on('data', chunk => {
@@ -762,6 +782,7 @@ function runPython(code, timeoutMs = 30000) {
       }
       resolve({ stdout, stderr });
     });
+    child.unref();
   });
 }
 

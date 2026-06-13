@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { stat } from 'fs/promises';
 import { ensureAppDirs, listWorkspaces, createWorkspace, getWorkspaceMeta, getWorkspaceMetaInternal, readWorkspaceFile, writeWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip, isAllowedReadablePath } from './workspace.js';
 import { generateProblem, generateSolution, generateDataPlan, runDataGenerator } from './tasks.js';
 import { subscribeWorkspace } from './events.js';
@@ -151,7 +152,7 @@ app.post('/api/workspaces/:id/data/run', async (req, res) => {
   }
 });
 
-const clientExists = await import('fs/promises').then(fs => fs.stat(CLIENT_DIST).then(() => true).catch(() => false));
+const clientExists = await stat(CLIENT_DIST).then(() => true).catch(() => false);
 if (process.env.NODE_ENV === 'production' && clientExists) {
   app.use(express.static(CLIENT_DIST));
   app.get('*', (_req, res) => {
