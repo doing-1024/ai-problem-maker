@@ -27,6 +27,8 @@ COPY --from=build /app/scripts ./scripts
 
 RUN mkdir -p /app/workspaces
 
+VOLUME ["/app/workspaces"]
+
 EXPOSE 7860
 
 CMD ["node", "server/index.js"]

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import os from 'os';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DATA_DIR = path.join(ROOT, 'workspaces');
+const DATA_DIR = process.env.WORKSPACE_STORAGE || path.join(ROOT, 'workspaces');
 
 export async function ensureAppDirs() {
   await fs.mkdir(DATA_DIR, { recursive: true });
