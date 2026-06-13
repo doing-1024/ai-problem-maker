@@ -2,7 +2,7 @@
   <div class="ide-shell">
     <header class="titlebar">
       <div class="brand">
-        <span class="brand-mark">APM</span>
+        <span class="brand-mark">ASOI</span>
         <span>AI 出题工作台</span>
       </div>
       <div class="titlebar-meta">
