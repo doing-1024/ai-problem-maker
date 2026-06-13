@@ -637,6 +637,13 @@ export async function generateDataPlan(workspaceId) {
       await setState(workspaceId, 'data', 'done', '数据方案与生成器已生成');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据方案与生成器已生成' });
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] done\n`);
+
+      try {
+        await runDataGenerator(workspaceId);
+      } catch (runError) {
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] auto run failed: ${runError.message}\n`);
+      }
+
       return { plan, genPy, cached: false };
     } catch (error) {
       await setState(workspaceId, 'data', 'error', error.message || 'data planning failed');
