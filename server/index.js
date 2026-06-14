@@ -56,7 +56,13 @@ app.get(/^\/api\/workspaces\/([^/]+)\/files\/(.+)$/, async (req, res) => {
       throw error;
     }
     const content = await readWorkspaceFile(id, rel);
-    res.type('text/plain').send(content);
+    const isBinary = /\.zip$|\.gz$|\.tar$|\.bz2$|\.xz$|\.7z$/.test(rel);
+    if (isBinary && typeof content === 'string') {
+      const buf = Buffer.from(content, 'latin1');
+      res.type('application/octet-stream').send(buf);
+    } else {
+      res.type('text/plain').send(content);
+    }
   } catch (error) {
     res.status(error.statusCode || 404).json({ error: error.message });
   }
