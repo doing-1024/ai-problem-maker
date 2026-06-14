@@ -83,12 +83,12 @@
           </div>
           <div class="workspace-card">
             <div class="label">当前 ID</div>
-            <div class="mono">{{ workspaceId || '无' }}</div>
+            <div class="mono" style="word-break: break-all;">{{ workspaceId || '无' }}</div>
           </div>
-          <div style="padding: 10px; display: flex; flex-direction: column; gap: 6px;">
-            <input v-model="openWorkspaceId" placeholder="输入工作区 ID" @keyup.enter="openExistingWorkspace" :disabled="!openWorkspaceId.trim()" />
-            <button class="button primary block" @click="openExistingWorkspace" :disabled="!openWorkspaceId.trim()">打开工作区</button>
-            <button class="button block" @click="copyWorkspaceId" :disabled="!workspaceId">复制 ID</button>
+          <div class="workspace-card" style="margin-top: 6px; display: flex; flex-direction: column; gap: 6px; margin: 0;">
+            <input class="no-margin" v-model="openWorkspaceId" type="text" spellcheck="false" autocomplete="off" placeholder="输入工作区 ID" @keyup.enter="openExistingWorkspace" :disabled="!openWorkspaceId.trim()" />
+            <button class="button" @click="openExistingWorkspace" :disabled="!openWorkspaceId.trim()">打开工作区</button>
+            <button class="button" @click="copyWorkspaceId" :disabled="!workspaceId">复制 ID</button>
           </div>
         </section>
 

@@ -415,6 +415,10 @@ input:focus,
   line-height: 1.45;
 }
 
+.no-margin {
+  margin: 0 !important;
+}
+
 .button,
 .link-button {
   height: 24px;
