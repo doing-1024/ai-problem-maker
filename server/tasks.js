@@ -703,7 +703,7 @@ out_dir = work / "out"
 if out_dir.exists():
     shutil.rmtree(out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(work), capture_output=True, text=True, timeout=30)
+proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(out_dir), capture_output=True, text=True, timeout=30)
 stdout = proc.stdout
 stderr = proc.stderr
 zip_path = work / "datas.zip"
