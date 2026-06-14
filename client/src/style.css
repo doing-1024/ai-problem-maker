@@ -83,6 +83,19 @@ button {
   font-size: 11px;
 }
 
+.brand-github {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  color: var(--muted);
+  opacity: 0.8;
+  transition: opacity 0.15s;
+}
+
+.brand-github:hover {
+  opacity: 1;
+}
+
 .titlebar-meta {
   justify-content: center;
   gap: 18px;
