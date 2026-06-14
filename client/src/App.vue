@@ -11,6 +11,7 @@
       <div class="titlebar-meta">
         <span>{{ workspaceId || '未选择工作区' }}</span>
         <span>{{ liveEvent ? activeJobMessage || '任务运行中' : '就绪' }}</span>
+        <button class="button small" @click="disconnectWorkspace" :disabled="!workspaceId">断开</button>
       </div>
       <div class="titlebar-actions">
         <button class="button" @click="createWorkspace">新建工作区</button>
@@ -83,6 +84,11 @@
           <div class="workspace-card">
             <div class="label">当前 ID</div>
             <div class="mono">{{ workspaceId || '无' }}</div>
+          </div>
+          <div style="padding: 10px; display: flex; flex-direction: column; gap: 6px;">
+            <input v-model="openWorkspaceId" placeholder="输入工作区 ID" @keyup.enter="openExistingWorkspace" :disabled="!openWorkspaceId.trim()" />
+            <button class="button primary block" @click="openExistingWorkspace" :disabled="!openWorkspaceId.trim()">打开工作区</button>
+            <button class="button block" @click="copyWorkspaceId" :disabled="!workspaceId">复制 ID</button>
           </div>
         </section>
 
@@ -181,6 +187,7 @@ const status = ref({
 
 const zipContents = ref(new Map());
 const expandedZips = ref(new Set());
+const openWorkspaceId = ref('');
 
 let eventSource = null;
 let monacoEditor = null;
@@ -287,6 +294,69 @@ function persistWorkspace(meta) {
   workspaceToken.value = meta.accessToken || workspaceToken.value || '';
   localStorage.setItem('workspaceId', workspaceId.value);
   if (workspaceToken.value) localStorage.setItem('workspaceToken', workspaceToken.value);
+}
+
+async function openExistingWorkspace() {
+  const id = openWorkspaceId.value.trim();
+  if (!id) return;
+  clearMessages();
+  try {
+    const res = await fetch(`/api/workspaces/${id}`, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const text = await res.text();
+    let meta;
+    try {
+      meta = JSON.parse(text);
+    } catch {
+      throw new Error(text || 'workspace not found');
+    }
+    if (!res.ok) throw new Error(meta.error || 'workspace not found');
+    workspaceId.value = meta.workspaceId;
+    workspaceToken.value = meta.accessToken;
+    openWorkspaceId.value = '';
+    localStorage.setItem('workspaceId', workspaceId.value);
+    localStorage.setItem('workspaceToken', workspaceToken.value);
+    connectLiveFeed();
+    await loadWorkspace();
+    successMessage.value = '已打开工作区';
+  } catch (error) {
+    errorMessage.value = error.message;
+  }
+}
+
+function copyWorkspaceId() {
+  if (!workspaceId.value) return;
+  navigator.clipboard.writeText(workspaceId.value).then(() => {
+    successMessage.value = 'ID 已复制到剪贴板';
+  }).catch(() => {
+    errorMessage.value = '复制失败';
+  });
+}
+
+function disconnectWorkspace() {
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  workspaceId.value = '';
+  workspaceToken.value = '';
+  openWorkspaceId.value = '';
+  files.value = [];
+  selectedFile.value = '';
+  selectedContent.value = '';
+  editorContent.value = '';
+  problemRaw.value = '';
+  status.value = {
+    problem: { state: 'idle', message: '' },
+    solution: { state: 'idle', message: '' },
+    data: { state: 'idle', message: '' }
+  };
+  zipContents.value.clear();
+  expandedZips.value.clear();
+  localStorage.removeItem('workspaceId');
+  localStorage.removeItem('workspaceToken');
+  clearMessages();
 }
 
 async function api(url, options = {}) {
