@@ -190,6 +190,26 @@ const expandedZips = ref(new Set());
 const openWorkspaceId = ref('');
 
 let eventSource = null;
+
+function updateZipContents(zipPath, entries) {
+  const next = new Map(zipContents.value);
+  next.set(zipPath, entries);
+  zipContents.value = next;
+}
+
+function clearZipCache() {
+  zipContents.value = new Map();
+}
+
+function toggleZipExpanded(zipPath) {
+  const next = new Set(expandedZips.value);
+  if (next.has(zipPath)) {
+    next.delete(zipPath);
+  } else {
+    next.add(zipPath);
+  }
+  expandedZips.value = next;
+}
 let monacoEditor = null;
 let monacoChangeSubscription = null;
 let settingEditorValue = false;
@@ -352,8 +372,8 @@ function disconnectWorkspace() {
     solution: { state: 'idle', message: '' },
     data: { state: 'idle', message: '' }
   };
-  zipContents.value.clear();
-  expandedZips.value.clear();
+  zipContents.value = new Map();
+  expandedZips.value = new Set();
   localStorage.removeItem('workspaceId');
   localStorage.removeItem('workspaceToken');
   clearMessages();
@@ -390,8 +410,8 @@ async function loadWorkspace() {
   status.value = meta.status || status.value;
   const fileResp = await api(`/api/workspaces/${workspaceId.value}/files`);
   files.value = fileResp.files || [];
-  zipContents.value.clear();
-  expandedZips.value.clear();
+  clearZipCache();
+  expandedZips.value = new Set();
   await loadProblemRaw();
   await loadLogs();
 }
@@ -433,10 +453,10 @@ async function loadZipContents(zipPath) {
     const entries = Object.keys(zip.files)
       .filter(name => !zip.files[name].dir)
       .sort();
-    zipContents.value.set(zipPath, entries);
+    updateZipContents(zipPath, entries);
   } catch (error) {
-    console.error('Failed to load zip contents:', error);
-    zipContents.value.set(zipPath, []);
+    errorMessage.value = `读取 ZIP 失败: ${error.message}`;
+    updateZipContents(zipPath, []);
   }
 }
 
@@ -471,10 +491,8 @@ async function openFile(file) {
     }
 
     if (file.endsWith('.zip')) {
+      toggleZipExpanded(file);
       if (expandedZips.value.has(file)) {
-        expandedZips.value.delete(file);
-      } else {
-        expandedZips.value.add(file);
         await loadZipContents(file);
       }
       selectedContent.value = `ZIP 文件: ${file}\n点击展开查看内部文件 (${(zipContents.value.get(file) || []).length} 个文件)`;
