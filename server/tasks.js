@@ -683,34 +683,125 @@ export async function runDataGenerator(workspaceId) {
       throw error;
     }
     genPy = extractCodeBlock(genPy, 'python') || genPy;
-    const fingerprint = hashText(genPy);
+    const originalGenPy = genPy;
     const meta = await getWorkspaceMetaInternal(workspaceId);
-    if (meta?.jobs?.run?.fingerprint === fingerprint && (await exists(workspaceId, 'data/datas.zip'))) {
-      return { artifact: 'data/datas.zip', cached: true };
-    }
+    const dataPlan = await safeRead(workspaceId, 'data/hack_plan.md');
 
     await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start generator run\n`);
-    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在运行数据生成器' });
-    try {
-      const result = await executePythonGenerator(workspaceId, genPy);
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
-      assertDataZipLooksValid(result.zipContent);
-      await verifyZipArchive(result.zipContent);
-      await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
-      await saveJobResult(workspaceId, 'run', fingerprint, { resultPath: 'data/datas.zip' });
-      await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run finished\n`);
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据包已生成' });
-      return { artifact: 'data/datas.zip', cached: false, stdout: result.stdout, stderr: result.stderr };
-    } catch (error) {
-      await setState(workspaceId, 'data', 'error', error.message || 'run failed');
-      await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run failed: ${error.message}\n`);
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'error', message: error.message || 'run failed' });
-      throw error;
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const isRetry = attempt > 1;
+      if (isRetry) {
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'data',
+          state: 'running',
+          message: `正在用 LLM 修复 gen.py 并重试 ${attempt - 1}/2`
+        });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] auto-repair attempt ${attempt - 1}\n`);
+        genPy = await repairGenPy(workspaceId, genPy, lastError, dataPlan);
+        await writeWorkspaceFile(workspaceId, 'data/gen.py', genPy);
+      }
+
+      const fingerprint = hashText(genPy);
+      if (meta?.jobs?.run?.fingerprint === fingerprint && (await exists(workspaceId, 'data/datas.zip'))) {
+        return { artifact: 'data/datas.zip', cached: true };
+      }
+
+      emitWorkspaceEvent(workspaceId, 'task:update', {
+        stage: 'data',
+        state: 'running',
+        message: isRetry ? `正在重试数据生成 ${attempt - 1}/2` : '正在运行数据生成器'
+      });
+
+      try {
+        const timeoutMs = 60000 + (attempt - 1) * 30000;
+        const result = await executePythonGenerator(workspaceId, genPy, timeoutMs);
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
+        assertDataZipLooksValid(result.zipContent);
+        await verifyZipArchive(result.zipContent);
+        await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
+        await saveJobResult(workspaceId, 'run', fingerprint, { resultPath: 'data/datas.zip' });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run finished${isRetry ? ` (after ${attempt - 1} repairs)` : ''}\n`);
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据包已生成' });
+        return { artifact: 'data/datas.zip', cached: false, stdout: result.stdout, stderr: result.stderr };
+      } catch (error) {
+        lastError = error;
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run attempt ${attempt} failed: ${error.message}\n`);
+        if (attempt >= 3) {
+          await setState(workspaceId, 'data', 'error', `生成器连续 ${attempt} 次失败: ${error.message}`);
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'data',
+            state: 'error',
+            message: `生成器连续 ${attempt} 次失败: ${error.message}`
+          });
+          throw error;
+        }
+      }
     }
   });
 }
 
-async function executePythonGenerator(workspaceId, genPy) {
+async function repairGenPy(workspaceId, brokenGenPy, error, dataPlan) {
+  const errorMessage = String(error?.message || error || 'unknown error');
+  const diffCtx = (await getWorkspaceMetaInternal(workspaceId))?.difficulty || {};
+  const diffInfo = diffCtx.instruction ? `目标难度：${diffCtx.instruction}` : '';
+
+  const repaired = await callLLM(
+    [
+      {
+        role: 'system',
+        content: [
+          '你是 Python 数据生成器修复专家。根据错误信息修复 gen.py。',
+          '修复要求：',
+          '1. 必须是独立可运行的单个 Python 脚本。',
+          '2. 必须写入 out/ 目录，命名为 out/1.in, out/1.out, out/2.in, out/2.out ...',
+          '3. 必须用 os.makedirs("out", exist_ok=True) 创建目录。',
+          '4. 必须内嵌标程逻辑计算 .out 文件，不依赖外部文件。',
+          '5. gen.py 执行时间不得超过 90 秒，避免死循环或超大规模数据。',
+          '6. 只输出 ```python 代码块，不要额外解释。',
+          `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+          '数据规模对齐目标难度。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'FIX_GEN_PY',
+          diffInfo,
+          '数据方案:',
+          dataPlan || '',
+          '失败的 gen.py:',
+          brokenGenPy || '',
+          '错误信息:',
+          errorMessage
+        ].filter(Boolean).join('\n')
+      }
+    ],
+    {
+      temperature: 0.15,
+      timeoutMs: 90000,
+      maxTokens: 8192,
+      retries: 3,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'data.log', 'gen.py repair', info);
+      },
+      onRetry: async ({ attempt, retries, error }) => {
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'data',
+          state: 'running',
+          message: `gen.py 修复 LLM 调用重试 ${attempt + 1}/${retries}`
+        });
+      }
+    }
+  );
+
+  const cleaned = extractCodeBlock(repaired, 'python') || repaired;
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen-repair', text: cleaned.slice(0, 320) });
+  return cleaned;
+}
+
+async function executePythonGenerator(workspaceId, genPy, timeoutMs = 45000) {
   const root = path.resolve(process.cwd(), 'workspaces', workspaceId);
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-${workspaceId}-`));
   const scriptPath = path.join(workDir, 'gen.py');
@@ -763,7 +854,7 @@ else:
     print("ZIP_END")
 `;  
 
-  const result = await runPython(runner, 45000);
+  const result = await runPython(runner, timeoutMs);
 
   const genError = extractBetween(result.stdout, 'ERROR_BEGIN', 'ERROR_END').trim();
   if (genError) {
