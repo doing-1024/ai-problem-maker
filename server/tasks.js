@@ -609,11 +609,30 @@ export async function generateDataPlan(workspaceId) {
           role: 'system',
           content: [
             '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。',
+            '',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-            '生成数据的规模必须对齐目标难度。'
+            '生成数据的规模必须对齐目标难度。',
+            '',
+            '输出要求（严格遵循）：',
+            '1. 所有测试数据文件必须写入 out/ 目录。',
+            '2. 命名规则：out/1.in, out/1.out, out/2.in, out/2.out, ...，按测试点序号递增。',
+            '3. .in 是输入文件，.out 是输出文件（你需要用标程的逻辑算出正确答案）。',
+            '4. 必须用 os.makedirs("out", exist_ok=True) 确保目录存在。',
+            '5. 必须包含等价的标程逻辑（可直接内嵌即可，不需要 import 外部文件），用于生成 .out 文件。',
+            '6. 数据生成器必须是自包含的单个 Python 脚本，不依赖外部题解文件。',
+            '7. 只有一段 ```python 代码块，不要其他解释。'
           ].join('\n')
         },
-        { role: 'user', content: ['GEN_PY', diffInfo, 'SOURCE_TEXT:', plan || ''].filter(Boolean).join('\n') }
+        {
+          role: 'user',
+          content: [
+            'GEN_PY',
+            `你必须将数据文件写入 out/ 目录，命名为 out/1.in, out/1.out, out/2.in, out/2.out ...`,
+            diffInfo,
+            '数据方案:',
+            plan || ''
+          ].filter(Boolean).join('\n')
+        }
       ];
       const genPy = await callLLM(genPrompt, {
         temperature: 0.2,

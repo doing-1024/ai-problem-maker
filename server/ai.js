@@ -117,7 +117,32 @@ function mockLLM(messages, options = {}) {
   }
 
   if (joined.includes('GEN_PY')) {
-    return `import random\n\nrandom.seed(0)\nprint(1)\nprint(1)\n`;
+    return [
+      'import os, random',
+      '',
+      'os.makedirs("out", exist_ok=True)',
+      '',
+      'def solve(a, b):',
+      '    return a + b',
+      '',
+      'testcases = [',
+      '    (1, 1),',
+      '    (10, 100),',
+      '    (100, 1000),',
+      '    (1000, 10000),',
+      '    (100000, 100000),',
+      ']',
+      '',
+      'random.seed(42)',
+      'for i, (a_max, b_max) in enumerate(testcases, start=1):',
+      '    a = random.randint(1, a_max)',
+      '    b = random.randint(1, b_max)',
+      '    with open(f"out/{i}.in", "w") as fin:',
+      '        fin.write(f"{a} {b}\\n")',
+      '    with open(f"out/{i}.out", "w") as fout:',
+      '        fout.write(f"{solve(a, b)}\\n")',
+      ''
+    ].join('\n');
   }
 
   return options.fallback ?? 'mock response';
