@@ -170,12 +170,18 @@ export async function writeWorkspaceFile(id, rel, content) {
   if (!allowedUserWritePath(safeRel)) {
     throw new Error('path not allowed');
   }
-  if (Buffer.byteLength(String(content), 'utf8') > 2 * 1024 * 1024) {
-    throw new Error('content too large');
+  if (Buffer.isBuffer(content)) {
+    const abs = path.join(dir, safeRel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, content);
+  } else {
+    if (Buffer.byteLength(String(content), 'utf8') > 2 * 1024 * 1024) {
+      throw new Error('content too large');
+    }
+    const abs = path.join(dir, safeRel);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, content, 'utf8');
   }
-  const abs = path.join(dir, safeRel);
-  await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, content, 'utf8');
   await refreshWorkspaceMeta(id);
 }
 
