@@ -24,7 +24,12 @@
         </div>
         <div class="file-tree" v-if="groupedFiles.length">
           <section v-for="group in groupedFiles" :key="group.name" class="file-group">
-            <div class="group-name">{{ group.name }}</div>
+            <div class="group-name">
+              <span v-if="group.isZip" class="zip-toggle" @click.stop="openFile(group.zipPath)">
+                {{ group.expanded ? '▼' : '▶' }}
+              </span>
+              {{ group.name }}
+            </div>
             <button
               v-for="file in group.files"
               :key="file"
@@ -141,6 +146,7 @@ import 'monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution';
 import 'monaco-editor/esm/vs/basic-languages/python/python.contribution';
 import 'monaco-editor/esm/vs/language/json/monaco.contribution';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import JSZip from 'jszip';
 
 self.MonacoEnvironment = {
   getWorker() {
@@ -170,6 +176,9 @@ const status = ref({
   data: { state: 'idle', message: '' }
 });
 
+const zipContents = ref(new Map());
+const expandedZips = ref(new Set());
+
 let eventSource = null;
 let monacoEditor = null;
 let monacoChangeSubscription = null;
@@ -185,8 +194,9 @@ const writableFiles = new Set([
 ]);
 
 const defaultFileName = computed(() => selectedFile.value || 'problem/problem.md');
-const canEditSelected = computed(() => Boolean(selectedFile.value && writableFiles.has(selectedFile.value)));
-const editorIsText = computed(() => !selectedFile.value || !selectedFile.value.endsWith('.zip'));
+const isZipInternalFile = computed(() => selectedFile.value && selectedFile.value.includes('::'));
+const canEditSelected = computed(() => Boolean(selectedFile.value && writableFiles.has(selectedFile.value) && !isZipInternalFile.value));
+const editorIsText = computed(() => !selectedFile.value || !selectedFile.value.endsWith('.zip') || isZipInternalFile.value);
 const isDirty = computed(() => editorContent.value !== selectedContent.value && canEditSelected.value && !livePreview.value);
 
 const groupedFiles = computed(() => {
@@ -196,10 +206,27 @@ const groupedFiles = computed(() => {
     if (!buckets.has(group)) buckets.set(group, []);
     buckets.get(group).push(file);
   }
-  return Array.from(buckets.entries()).map(([name, groupFiles]) => ({
+  const groups = Array.from(buckets.entries()).map(([name, groupFiles]) => ({
     name,
     files: groupFiles.sort()
   }));
+
+  for (const zipFile of files.value.filter(f => f.endsWith('.zip'))) {
+    const contents = zipContents.value.get(zipFile) || [];
+    if (contents.length > 0) {
+      const zipGroupName = `${zipFile} [zip]`;
+      const isExpanded = expandedZips.value.has(zipFile);
+      groups.push({
+        name: zipGroupName,
+        files: isExpanded ? contents.map(c => `${zipFile}::${c}`) : [],
+        isZip: true,
+        zipPath: zipFile,
+        expanded: isExpanded
+      });
+    }
+  }
+
+  return groups;
 });
 
 const pipeline = computed(() => [
@@ -290,6 +317,8 @@ async function loadWorkspace() {
   status.value = meta.status || status.value;
   const fileResp = await api(`/api/workspaces/${workspaceId.value}/files`);
   files.value = fileResp.files || [];
+  zipContents.value.clear();
+  expandedZips.value.clear();
   await loadProblemRaw();
   await loadLogs();
 }
@@ -319,16 +348,67 @@ async function readFile(file) {
   return text;
 }
 
+async function loadZipContents(zipPath) {
+  if (zipContents.value.has(zipPath)) return;
+  try {
+    const res = await fetch(`/api/workspaces/${workspaceId.value}/files/${zipPath}`, {
+      headers: { 'x-workspace-token': workspaceToken.value }
+    });
+    if (!res.ok) throw new Error('failed to fetch zip');
+    const arrayBuffer = await res.arrayBuffer();
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const entries = Object.keys(zip.files)
+      .filter(name => !zip.files[name].dir)
+      .sort();
+    zipContents.value.set(zipPath, entries);
+  } catch (error) {
+    console.error('Failed to load zip contents:', error);
+    zipContents.value.set(zipPath, []);
+  }
+}
+
+async function readZipFile(zipPath, innerPath) {
+  try {
+    const res = await fetch(`/api/workspaces/${workspaceId.value}/files/${zipPath}`, {
+      headers: { 'x-workspace-token': workspaceToken.value }
+    });
+    if (!res.ok) throw new Error('failed to fetch zip');
+    const arrayBuffer = await res.arrayBuffer();
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const file = zip.files[innerPath];
+    if (!file) throw new Error('file not found in zip');
+    return await file.async('text');
+  } catch (error) {
+    throw new Error(`Failed to read zip file: ${error.message}`);
+  }
+}
+
 async function openFile(file) {
   clearMessages();
   try {
     selectedFile.value = file;
     livePreview.value = false;
+
+    if (file.includes('::')) {
+      const [zipPath, innerPath] = file.split('::', 2);
+      const text = await readZipFile(zipPath, innerPath);
+      selectedContent.value = text;
+      editorContent.value = text;
+      return;
+    }
+
     if (file.endsWith('.zip')) {
-      selectedContent.value = '二进制压缩包：请使用右上角下载整包。';
+      if (expandedZips.value.has(file)) {
+        expandedZips.value.delete(file);
+      } else {
+        expandedZips.value.add(file);
+        await loadZipContents(file);
+      }
+      selectedContent.value = `ZIP 文件: ${file}\n点击展开查看内部文件 (${(zipContents.value.get(file) || []).length} 个文件)`;
       editorContent.value = selectedContent.value;
       return;
     }
+
     const text = await readFile(file);
     selectedContent.value = text;
     editorContent.value = text;
@@ -515,11 +595,12 @@ function editorReadOnly() {
 }
 
 function editorLanguage(file) {
-  if (file.endsWith('.md')) return 'markdown';
-  if (file.endsWith('.cpp') || file.endsWith('.cc') || file.endsWith('.h')) return 'cpp';
-  if (file.endsWith('.py')) return 'python';
-  if (file.endsWith('.json')) return 'json';
-  if (file.endsWith('.log')) return 'plaintext';
+  const cleanFile = file.includes('::') ? file.split('::')[1] : file;
+  if (cleanFile.endsWith('.md')) return 'markdown';
+  if (cleanFile.endsWith('.cpp') || cleanFile.endsWith('.cc') || cleanFile.endsWith('.h')) return 'cpp';
+  if (cleanFile.endsWith('.py')) return 'python';
+  if (cleanFile.endsWith('.json')) return 'json';
+  if (cleanFile.endsWith('.log')) return 'plaintext';
   return 'plaintext';
 }
 
@@ -529,16 +610,20 @@ function clearMessages() {
 }
 
 function baseName(file) {
-  return file.split('/').pop();
+  const cleanFile = file.includes('::') ? file.split('::')[1] : file;
+  return cleanFile.split('/').pop();
 }
 
 function fileIcon(file) {
-  if (file.endsWith('.md')) return 'MD';
-  if (file.endsWith('.cpp')) return 'C++';
-  if (file.endsWith('.py')) return 'PY';
-  if (file.endsWith('.zip')) return 'ZIP';
-  if (file.endsWith('.json')) return 'JSON';
-  if (file.endsWith('.log')) return 'LOG';
+  const cleanFile = file.includes('::') ? file.split('::')[1] : file;
+  if (cleanFile.endsWith('.md')) return 'MD';
+  if (cleanFile.endsWith('.cpp') || cleanFile.endsWith('.cc') || cleanFile.endsWith('.h')) return 'C++';
+  if (cleanFile.endsWith('.py')) return 'PY';
+  if (cleanFile.endsWith('.zip')) return 'ZIP';
+  if (cleanFile.endsWith('.json')) return 'JSON';
+  if (cleanFile.endsWith('.log')) return 'LOG';
+  if (cleanFile.endsWith('.in')) return 'IN';
+  if (cleanFile.endsWith('.out')) return 'OUT';
   return 'TXT';
 }
 
