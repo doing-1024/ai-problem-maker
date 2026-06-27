@@ -610,12 +610,13 @@ export async function generateDataPlan(workspaceId) {
           content: [
             '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-            '生成数据的规模必须对齐目标难度。'
+            '生成数据的规模必须对齐目标难度。',
+            '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。'
           ].join('\n')
         },
         { role: 'user', content: ['GEN_PY', diffInfo, 'SOURCE_TEXT:', plan || ''].filter(Boolean).join('\n') }
       ];
-      const genPy = await callLLM(genPrompt, {
+      let genPy = await callLLM(genPrompt, {
         temperature: 0.2,
         retries: 5,
         onRetry: async ({ attempt, retries, error }) => {
@@ -628,6 +629,7 @@ export async function generateDataPlan(workspaceId) {
         }
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
+      genPy = extractPythonCode(genPy) || genPy;
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
       await writeWorkspaceFile(workspaceId, 'data/gen.py', genPy);
@@ -703,15 +705,35 @@ out_dir = work / "out"
 if out_dir.exists():
     shutil.rmtree(out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(work), capture_output=True, text=True, timeout=30)
+proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(out_dir), capture_output=True, text=True, timeout=30)
 stdout = proc.stdout
 stderr = proc.stderr
+if proc.returncode != 0:
+    print("STDOUT_BEGIN")
+    print(stdout)
+    print("STDOUT_END")
+    print("STDERR_BEGIN")
+    print(stderr)
+    print("STDERR_END")
+    print("ZIP_BEGIN")
+    print("ZIP_END")
+    sys.exit(1)
 zip_path = work / "datas.zip"
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
     if out_dir.exists():
         for p in out_dir.rglob("*"):
             if p.is_file():
                 zf.write(p, p.relative_to(out_dir).as_posix())
+if not any(out_dir.iterdir()):
+    print("STDOUT_BEGIN")
+    print(stdout)
+    print("STDOUT_END")
+    print("STDERR_BEGIN")
+    print(stderr)
+    print("STDERR_END")
+    print("ZIP_BEGIN")
+    print("ZIP_END")
+    sys.exit(1)
 print("STDOUT_BEGIN")
 print(stdout)
 print("STDOUT_END")
@@ -790,6 +812,14 @@ function extractCodeBlock(text, lang) {
 
 function stripCppBlock(text) {
   return text.replace(/```cpp[\s\S]*?```/i, '').trim();
+}
+
+function extractPythonCode(text) {
+  const extracted = extractCodeBlock(text, 'python');
+  if (extracted) return extracted;
+  const generic = extractCodeBlock(text, 'py');
+  if (generic) return generic;
+  return '';
 }
 
 function extractBetween(text, start, end) {
