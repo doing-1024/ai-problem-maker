@@ -170,19 +170,24 @@ export async function writeWorkspaceFile(id, rel, content) {
   if (!allowedUserWritePath(safeRel)) {
     throw new Error('path not allowed');
   }
-  if (Buffer.byteLength(String(content), 'utf8') > 2 * 1024 * 1024) {
+  const isZip = safeRel.endsWith('.zip');
+  const maxBytes = isZip ? 200 * 1024 * 1024 : 2 * 1024 * 1024;
+  const size = Buffer.isBuffer(content) ? content.length : Buffer.byteLength(String(content), 'utf8');
+  if (size > maxBytes) {
     throw new Error('content too large');
   }
   const abs = path.join(dir, safeRel);
   await fs.mkdir(path.dirname(abs), { recursive: true });
-  await fs.writeFile(abs, content, 'utf8');
+  await fs.writeFile(abs, content, isZip ? null : 'utf8');
   await refreshWorkspaceMeta(id);
 }
 
 export async function readWorkspaceFile(id, rel) {
   const safeRel = safeRelativePath(rel);
   const abs = path.join(workspaceDir(id), safeRel);
-  return fs.readFile(abs, 'utf8');
+  const isZip = safeRel.endsWith('.zip');
+  const data = await fs.readFile(abs, isZip ? null : 'utf8');
+  return data;
 }
 
 export async function listWorkspaceFiles(id) {
