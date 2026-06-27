@@ -664,7 +664,14 @@ export async function runDataGenerator(workspaceId) {
       error.statusCode = 400;
       throw error;
     }
-    const fingerprint = hashText(genPy);
+    const stdCpp = await safeRead(workspaceId, 'solution/std.cpp');
+    if (!stdCpp.trim()) {
+      const error = new Error('std.cpp not found');
+      error.statusCode = 400;
+      throw error;
+    }
+    const combinedInput = genPy + stdCpp;
+    const fingerprint = hashText(combinedInput);
     const meta = await getWorkspaceMetaInternal(workspaceId);
     if (meta?.jobs?.run?.fingerprint === fingerprint && (await exists(workspaceId, 'data/datas.zip'))) {
       return { artifact: 'data/datas.zip', cached: true };
@@ -673,7 +680,7 @@ export async function runDataGenerator(workspaceId) {
     await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start generator run\n`);
     emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在运行数据生成器' });
     try {
-      const result = await executePythonGenerator(workspaceId, genPy);
+      const result = await executePythonGenerator(workspaceId, genPy, stdCpp);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
       assertDataZipLooksValid(result.zipContent);
       await verifyZipArchive(result.zipContent);
@@ -691,11 +698,13 @@ export async function runDataGenerator(workspaceId) {
   });
 }
 
-async function executePythonGenerator(workspaceId, genPy) {
+async function executePythonGenerator(workspaceId, genPy, stdCpp) {
   const root = path.resolve(process.cwd(), 'workspaces', workspaceId);
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-${workspaceId}-`));
   const scriptPath = path.join(workDir, 'gen.py');
   await fs.writeFile(scriptPath, genPy, 'utf8');
+  const stdPath = path.join(workDir, 'std.cpp');
+  await fs.writeFile(stdPath, stdCpp, 'utf8');
 
   const runner = `
 import os, subprocess, sys, zipfile, pathlib, shutil, textwrap
@@ -705,7 +714,9 @@ out_dir = work / "out"
 if out_dir.exists():
     shutil.rmtree(out_dir)
 out_dir.mkdir(parents=True, exist_ok=True)
-proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(out_dir), capture_output=True, text=True, timeout=30)
+
+# run gen.py to produce .in files
+proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(out_dir), capture_output=True, text=True, timeout=60)
 stdout = proc.stdout
 stderr = proc.stderr
 if proc.returncode != 0:
@@ -718,22 +729,55 @@ if proc.returncode != 0:
     print("ZIP_BEGIN")
     print("ZIP_END")
     sys.exit(1)
-zip_path = work / "datas.zip"
-with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-    if out_dir.exists():
-        for p in out_dir.rglob("*"):
-            if p.is_file():
-                zf.write(p, p.relative_to(out_dir).as_posix())
-if not any(out_dir.iterdir()):
+
+in_files = sorted([p for p in out_dir.iterdir() if p.suffix == ".in"])
+if not in_files:
     print("STDOUT_BEGIN")
     print(stdout)
     print("STDOUT_END")
     print("STDERR_BEGIN")
-    print(stderr)
+    print("no .in files generated")
     print("STDERR_END")
     print("ZIP_BEGIN")
     print("ZIP_END")
     sys.exit(1)
+
+# compile std.cpp
+compile_proc = subprocess.run(["g++", "-std=c++17", "-O2", "-pipe", "-static", str(work / "std.cpp"), "-o", str(work / "std")], capture_output=True, text=True, timeout=60)
+if compile_proc.returncode != 0:
+    print("STDOUT_BEGIN")
+    print(stdout)
+    print("STDOUT_END")
+    print("STDERR_BEGIN")
+    print("compile failed:\\n" + compile_proc.stderr)
+    print("STDERR_END")
+    print("ZIP_BEGIN")
+    print("ZIP_END")
+    sys.exit(1)
+
+# run std against each .in to produce .out
+for in_file in in_files:
+    out_file = in_file.with_suffix(".out")
+    with open(in_file) as inf:
+        run_proc = subprocess.run([str(work / "std")], stdin=inf, capture_output=True, text=True, timeout=30)
+    if run_proc.returncode != 0:
+        print("STDOUT_BEGIN")
+        print(stdout)
+        print("STDOUT_END")
+        print("STDERR_BEGIN")
+        print(f"std failed on {in_file.name}:\\n" + run_proc.stderr)
+        print("STDERR_END")
+        print("ZIP_BEGIN")
+        print("ZIP_END")
+        sys.exit(1)
+    out_file.write_text(run_proc.stdout)
+
+# zip both .in and .out
+zip_path = work / "datas.zip"
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for p in sorted(out_dir.iterdir()):
+        if p.is_file():
+            zf.write(p, p.name)
 print("STDOUT_BEGIN")
 print(stdout)
 print("STDOUT_END")
@@ -745,7 +789,7 @@ print(zip_path.read_bytes().hex())
 print("ZIP_END")
 `; 
 
-  const result = await runPython(runner, 45000);
+  const result = await runPython(runner, 180000);
   const zipHex = extractBetween(result.stdout, 'ZIP_BEGIN', 'ZIP_END').trim();
   await fs.rm(workDir, { recursive: true, force: true });
   if (!zipHex) {
