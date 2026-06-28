@@ -110,6 +110,7 @@ export async function generateProblem(workspaceId, payload) {
             '',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '用户指定的目标难度必须严格遵守。关键是保证思维链深度、复合度和实现复杂度与目标匹配，而不是只看数据范围或算法名字。不得擅自降级——要求 NOIP 级别就不能写出思维链深度明显是入门级的题目。',
+            '也不得虚高——实际 CSP-S T3 级别的题不要标成 T4。标难度必须实事求是，符合思维链深度和模型复杂度。',
             '',
             '算法范式改编策略：',
             '- 同难度改编（mode=same）：保持原题基础算法范式一致，只改背景、故事、题名、变量名，让选手无法通过关键词搜到原题。原题是 DP 就仍是 DP，图论就仍是图论。',
@@ -123,6 +124,22 @@ export async function generateProblem(workspaceId, payload) {
             '## 样例',
             '## 数据范围与提示',
             '不得省略任何一节。标记为 PROBLEM_REWRITE。',
+            '⚠️ 提示部分（数据范围与提示）只允许给出方向性提示（如"可以用某种优化结构的 DP"），不允许直接给出状态定义、转移方程、或具体算法名称（如"单调队列"）。',
+            '⚠️ 样例部分必须用 HTML 注释标记样例输入和输出的代码块，格式如下：',
+            '',
+            '<!--SAMPLE_INPUT-->',
+            '```',
+            '样例输入内容',
+            '```',
+            '<!--SAMPLE_INPUT_END-->',
+            '<!--SAMPLE_OUTPUT-->',
+            '```',
+            '样例输出内容（可以随便写，后面会被自动替换为标程的真实输出）',
+            '```',
+            '<!--SAMPLE_OUTPUT_END-->',
+            '',
+            '注意：如果有多个样例（样例1、样例2），每组都要用各自的注释包裹。',
+            '注释必须紧贴在代码块上方，不能有其他 Markdown 内容隔开。',
             '',
             `改编示例：${FEW_SHOT_EXAMPLE}`
           ].join('\n')
@@ -243,7 +260,9 @@ async function reviewAndReviseProblem(workspaceId, initialContent, source, diffi
             '必须检查：',
             '1. 是否严格命中用户目标难度——关键是思维链深度、复合程度、建模难度是否对齐目标级别，而非仅看数据范围或算法名字；',
             '2. 算法范式是否合理：同难度改编不应改变算法范式；提升难度改编应升级算法（如同难度的 BFS→BFS，但提升难度可以 BFS→DP），不能降级；',
-            '3. 是否只是改题名或背景而没有实质改编。',
+            '3. 是否只是改题名或背景而没有实质改编；',
+            '4. 样例自洽性：检查样例输入、样例输出和样例说明是否互相一致。如果样例说明的计算结果是 X 但输出写的是 Y，必须指出。',
+            '标难度偏高（例如实际 T3 标成 T4）也算 FAIL。',
             '输出第一行只能是 PASS 或 FAIL，后面用简短中文列出理由和必须修改点。标记为 PROBLEM_REVIEW。'
           ].join('\n')
         },
@@ -296,6 +315,10 @@ async function reviewAndReviseProblem(workspaceId, initialContent, source, diffi
             '你是资深 OI 题目修订员。根据审稿意见重写题面。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '必须严格命中用户目标难度，不得降档；同难度则保持算法范式一致；提升难度可在原谱系内升级或审慎升级范式。大幅重写背景和叙事。',
+            '必须确保：样例输入、样例输出和样例说明三者自洽，不能自相矛盾；',
+            '必须保留原始题面中的 HTML 注释标记（<!--SAMPLE_INPUT-->, <!--SAMPLE_INPUT_END-->, <!--SAMPLE_OUTPUT-->, <!--SAMPLE_OUTPUT_END-->），这些标记用于自动化校验，不能删除或改动；',
+            '提示部分不得直接给出转移方程、状态设计或具体算法名称（如"单调队列"），只能给方向性提示；',
+            '标难度不得虚高——实际 CSP-S T3 级别的题不要标成 T4。',
             '只输出完整 Markdown 题面，结构为：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。标记为 PROBLEM_REVISE。'
           ].join('\n')
         },
@@ -357,7 +380,9 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
             '你是题面重写与补全助手。请直接输出一份完整 Markdown 题面，不要解释，不要续写半截内容。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '用户目标难度必须严格遵守，不得降成更低档；同难度则保持算法范式一致；提升难度可在原谱系内升级或审慎升级范式。',
-            '必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。'
+            '必须包含且只需包含：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例必须有输入和输出。',
+            '⚠️ 提示部分不得直接给出状态定义、转移方程或具体算法名称。',
+            '⚠️ 必须保留原始题面中的 HTML 注释标记（<!--SAMPLE_INPUT-->, <!--SAMPLE_INPUT_END-->, <!--SAMPLE_OUTPUT-->, <!--SAMPLE_OUTPUT_END-->），这些标记用于自动化校验，不能删除或改动。',
           ].join('\n')
         },
         {
@@ -530,6 +555,7 @@ export async function generateSolution(workspaceId) {
       ensureSolutionMarkdownStructure(markdown);
       assertSolutionTextLooksReasonable(markdown, cpp);
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
+      await verifySampleWithStd(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
       await saveJobResult(workspaceId, 'solution', fingerprint, {
@@ -582,7 +608,8 @@ export async function generateDataPlan(workspaceId) {
             '你是资深 OI 数据构造助手。标记为 DATA_PLAN。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '数据范围、测试点规模必须对齐目标难度。',
-            '输出必须是 Markdown，严格包含 # 数据方案 和 ## 点数分布。'
+            '输出必须是 Markdown，严格包含 # 数据方案 和 ## 点数分布。',
+            '各测试点的 N 值（或其他规模参数）必须具体写明，后续 gen.py 会以此为准生成数据。不要出现方案中写 N=2e5 但实际生成器用 N=5000 的矛盾。'
           ].join('\n')
         },
         { role: 'user', content: ['DATA_PLAN', diffInfo, 'SOURCE_TEXT:', solution || ''].filter(Boolean).join('\n') }
@@ -615,7 +642,8 @@ export async function generateDataPlan(workspaceId) {
             '生成数据的规模必须对齐目标难度。',
             '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。',
             '生成的数据文件（如 1.in）必须直接写入当前工作目录，不要创建子目录。',
-            '数据的输入格式必须严格对标给定 C++ 标程的 cin 读入顺序和数据类型，不可自创格式。'
+            '数据的输入格式必须严格对标给定 C++ 标程的 cin 读入顺序和数据类型，不可自创格式。',
+            '数据方案中声明的 N 值必须与 gen.py 实际使用的 N 值一致。如果出于合理原因（如防 long long 溢出）需要改小 N，请确保数据方案的说明也随之同步更新，不要出现方案说 N=2e5 但代码实际用 N=5000 的矛盾。'
           ].join('\n')
         },
         {
@@ -651,6 +679,8 @@ export async function generateDataPlan(workspaceId) {
       genPy = extractPythonCode(genPy) || genPy;
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
+      plan = await validateDataPlanGenConsistency(workspaceId, plan, genPy, diffInfo);
+      await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
       await writeWorkspaceFile(workspaceId, 'data/gen.py', genPy);
       await saveJobResult(workspaceId, 'data', fingerprint, {
         resultPaths: ['data/hack_plan.md', 'data/gen.py']
@@ -1184,6 +1214,93 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
   return current;
 }
 
+async function verifySampleWithStd(workspaceId, stdCpp) {
+  const problemMd = await safeRead(workspaceId, 'problem/problem.md');
+  if (!problemMd || !problemMd.includes('<!--SAMPLE_INPUT')) return;
+
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'solution', state: 'running',
+    message: '正在用标程验证样例输出'
+  });
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] verify sample with std\n`);
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-sample-${workspaceId}-`));
+  try {
+    const stdBin = path.join(tmpDir, 'std');
+    await fs.writeFile(path.join(tmpDir, 'std.cpp'), stdCpp, 'utf8');
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'std.cpp'), '-o', stdBin], 45000);
+
+    let result = problemMd;
+    for (let idx = 1; ; idx++) {
+      const inTag = idx === 1 ? '<!--SAMPLE_INPUT-->' : `<!--SAMPLE_INPUT${idx}-->`;
+      const inEndTag = idx === 1 ? '<!--SAMPLE_INPUT_END-->' : `<!--SAMPLE_INPUT${idx}_END-->`;
+      const outTag = idx === 1 ? '<!--SAMPLE_OUTPUT-->' : `<!--SAMPLE_OUTPUT${idx}-->`;
+      const outEndTag = idx === 1 ? '<!--SAMPLE_OUTPUT_END-->' : `<!--SAMPLE_OUTPUT${idx}_END-->`;
+
+      const inStart = result.indexOf(inTag);
+      if (inStart === -1) break;
+
+      const inEnd = result.indexOf(inEndTag, inStart);
+      if (inEnd === -1) continue;
+      const inputMatch = result.slice(inStart, inEnd).match(/```(?:\w+)?\n([\s\S]*?)```/);
+      if (!inputMatch) continue;
+
+      const outStart = result.indexOf(outTag, inEnd);
+      if (outStart === -1) continue;
+      const outEnd = result.indexOf(outEndTag, outStart);
+      if (outEnd === -1) continue;
+      const outputMatch = result.slice(outStart, outEnd).match(/```(?:\w+)?\n[\s\S]*?```/);
+      if (!outputMatch) continue;
+
+      const sampleInput = inputMatch[1];
+      const oldOutputBlock = outputMatch[0];
+
+      const actualOutput = await runStdWithInput(stdBin, sampleInput, 30000);
+      const newOutputBlock = oldOutputBlock.replace(/```(?:\w+)?\n[\s\S]*?\n```/, '```\n' + actualOutput.trimEnd() + '\n```');
+
+      result = result.slice(0, outStart) + outTag + '\n' + newOutputBlock + '\n' + outEndTag + result.slice(outEnd + outEndTag.length);
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample ${idx}: old='${oldOutputBlock.match(/```\n([\s\S]*?)```/)?.[1]?.trim()}' new='${actualOutput.trim()}'\n`);
+    }
+
+    result = result.replace(/<!--SAMPLE_INPUT\d*-->/g, '');
+    result = result.replace(/<!--SAMPLE_INPUT\d*_END-->/g, '');
+    result = result.replace(/<!--SAMPLE_OUTPUT\d*-->/g, '');
+    result = result.replace(/<!--SAMPLE_OUTPUT\d*_END-->/g, '');
+    result = result.replace(/\n{3,}/g, '\n\n');
+
+    if (result !== problemMd) {
+      await writeWorkspaceFile(workspaceId, 'problem/problem.md', result);
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] problem.md sample output updated\n`);
+    }
+  } catch (error) {
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample verification skipped: ${error.message}\n`);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function runStdWithInput(stdBin, input, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(stdBin, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('sample std timeout'));
+    }, timeoutMs);
+    child.stdout.on('data', d => stdout += d);
+    child.stderr.on('data', d => stderr += d);
+    child.on('error', reject);
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) reject(new Error(stderr || `std exited ${code}`));
+      else resolve(stdout);
+    });
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+
 async function repairDataPlanOutput(workspaceId, plan, solution, diffInfo) {
   const text = String(plan || '');
   const missing = [];
@@ -1293,6 +1410,79 @@ function assertSolutionTextLooksReasonable(markdown, cpp) {
     error.statusCode = 422;
     throw error;
   }
+}
+
+async function validateDataPlanGenConsistency(workspaceId, plan, genPy, diffInfo) {
+  const pNums = extractNumbersFromText(plan, ['N', 'n']);
+  const gNums = extractNumbersFromText(genPy, ['N', 'n']);
+  const mismatch = findSignificantMismatch(pNums, gNums);
+  if (!mismatch) return plan;
+
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'data', state: 'running',
+    message: '正在修正数据方案与生成器的规模不一致'
+  });
+  await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] plan/gen mismatch: plan N=${mismatch.planVal}, gen N=${mismatch.genVal}\n`);
+
+  const fixed = await callLLM([
+    {
+      role: 'system',
+      content: '你是 OI 数据方案修订员。数据方案中声明的测试点规模（N 值）与 gen.py 实际使用的 N 值不一致。修正数据方案使其反映 gen.py 中的真实规模。只输出完整修正后的数据方案 Markdown，不要解释。标记为 DATA_PLAN_FIX。'
+    },
+    {
+      role: 'user',
+      content: [
+        'DATA_PLAN_FIX',
+        diffInfo,
+        `不一致：方案中说 N=${mismatch.planVal}，gen.py 实际使用 N=${mismatch.genVal}`,
+        '',
+        '数据方案:',
+        plan || '',
+        '',
+        'gen.py:',
+        genPy || '',
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.05,
+    timeoutMs: 45000,
+    maxTokens: 4096,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'data.log', 'data plan consistency fix', info);
+    },
+  });
+  return fixed;
+}
+
+function findSignificantMismatch(planNums, genNums) {
+  if (!planNums.length || !genNums.length) return null;
+  const planMax = Math.max(...planNums);
+  const genMax = Math.max(...genNums);
+  const ratio = Math.max(planMax, genMax) / Math.min(planMax, genMax);
+  if (ratio > 2) {
+    return { planVal: planMax, genVal: genMax };
+  }
+  return null;
+}
+
+function extractNumbersFromText(text, varNames) {
+  const nums = [];
+  for (const name of varNames) {
+    const re = new RegExp(`\\b${name}\\s*[=:×xX]\\s*(\\d+(?:\\.\\d+)?)(?:\\s*×\\s*10[⁰¹²³⁴⁵⁶⁷⁸⁹]|\\s*10\\^\\d+)?`, 'gi');
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const val = parseInt(m[1], 10);
+      if (!isNaN(val) && val > 0) nums.push(val);
+    }
+    const reSci = new RegExp(`\\b${name}\\s*[=:]\\s*(\\d+)\\s*[×xX*]\\s*10\\s*[\\^⁰¹²³⁴⁵⁶⁷⁸⁹]\\s*(\\d+)`, 'gi');
+    while ((m = reSci.exec(text)) !== null) {
+      const base = parseInt(m[1], 10);
+      const exp = parseInt(m[2], 10);
+      if (!isNaN(base) && !isNaN(exp)) nums.push(base * Math.pow(10, exp));
+    }
+  }
+  return nums;
 }
 
 function assertDataPlanLooksReasonable(plan, genPy) {
