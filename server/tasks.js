@@ -525,11 +525,11 @@ export async function generateSolution(workspaceId) {
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
       const repaired = await repairSolutionOutput(workspaceId, finalText, problem, diffInfo);
-      const cpp = extractCodeBlock(repaired, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
+      let cpp = extractCodeBlock(repaired, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
       const markdown = stripCppBlock(repaired);
       ensureSolutionMarkdownStructure(markdown);
       assertSolutionTextLooksReasonable(markdown, cpp);
-      await verifyCppCompiles(workspaceId, cpp);
+      cpp = await repairCppCompilation(workspaceId, cpp, problem);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
       await saveJobResult(workspaceId, 'solution', fingerprint, {
@@ -1081,6 +1081,60 @@ function hasComplexityAnalysis(text) {
     /(线性|对数|指数|多项式|平方|立方|常数|\$n\$\s*\(?\$?m\$?)/,
   ];
   return patterns.some(p => p.test(text));
+}
+
+async function repairCppCompilation(workspaceId, cpp, problem) {
+  let current = String(cpp || '');
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await verifyCppCompiles(workspaceId, current);
+      return current;
+    } catch (compileError) {
+      const message = compileError.message || '';
+      if (!message || attempt === 3) throw compileError;
+      emitWorkspaceEvent(workspaceId, 'task:update', {
+        stage: 'solution',
+        state: 'running',
+        message: `正在修复标程编译错误 ${attempt}/3`
+      });
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] compile fix ${attempt}/3: ${message.slice(0, 500)}\n`);
+      const fixed = await callLLM(
+        [
+          {
+            role: 'system',
+            content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。只输出修正后的完整 C++ 代码，不要 Markdown 包裹，不要解释。',
+          },
+          {
+            role: 'user',
+            content: [
+              '编译错误:',
+              message,
+              '',
+              '题目描述:',
+              problem || '',
+              '',
+              '当前代码:',
+              current || '',
+            ].join('\n'),
+          },
+        ],
+        {
+          temperature: 0.1,
+          timeoutMs: 60000,
+          maxTokens: 4096,
+          retries: 3,
+          onComplete: async info => {
+            await logLLMComplete(workspaceId, 'solution.log', `compile fix ${attempt}`, info);
+          },
+          onRetry: async ({ attempt: retryAttempt, retries, error }) => {
+            await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] compile fix LLM retry ${retryAttempt + 1}/${retries}: ${error.message}\n`);
+          },
+        }
+      );
+      current = extractCodeBlock(fixed, 'cpp') || fixed.trim() || current;
+    }
+  }
+  return current;
 }
 
 async function repairDataPlanOutput(workspaceId, plan, solution, diffInfo) {
