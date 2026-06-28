@@ -59,8 +59,20 @@
           <span>{{ activeJobMessage }}</span>
         </div>
 
+        <div v-if="isZipPreview" class="zip-tabs">
+          <button
+            v-for="zf in zipPreviewData.files"
+            :key="zf.name"
+            class="zip-tab"
+            :class="{ active: selectedZipFile === zf.name }"
+            @click="selectZipFile(zf.name)"
+          >
+            <span>{{ zf.name }}</span>
+            <span class="zip-size">{{ zf.size }}B</span>
+          </button>
+        </div>
         <div v-show="editorIsText" ref="editorHost" class="code-editor"></div>
-        <pre v-show="!editorIsText" class="binary-viewer">{{ selectedContent || '该文件不适合直接文本编辑，请下载整包查看。' }}</pre>
+        <pre v-show="!editorIsText" class="binary-viewer">{{ zipPreviewData === null && selectedFile.endsWith('.zip') ? '正在加载数据预览…' : (selectedContent || '该文件不适合直接文本编辑，请下载整包查看。') }}</pre>
 
         <div v-if="errorMessage" class="status-message error">{{ errorMessage }}</div>
         <div v-if="successMessage" class="status-message ok">{{ successMessage }}</div>
@@ -155,6 +167,8 @@ const selectedFile = ref('');
 const selectedContent = ref('');
 const editorContent = ref('');
 const editorHost = ref(null);
+const zipPreviewData = ref(null);
+const selectedZipFile = ref('');
 const problemRaw = ref('');
 const difficultyMode = ref('same');
 const difficultyText = ref('');
@@ -186,7 +200,12 @@ const writableFiles = new Set([
 
 const defaultFileName = computed(() => selectedFile.value || 'problem/problem.md');
 const canEditSelected = computed(() => Boolean(selectedFile.value && writableFiles.has(selectedFile.value)));
-const editorIsText = computed(() => !selectedFile.value || !selectedFile.value.endsWith('.zip'));
+const isZipPreview = computed(() => selectedFile.value.endsWith('.zip') && zipPreviewData.value !== null);
+const editorIsText = computed(() => {
+  if (!selectedFile.value) return true;
+  if (selectedFile.value.endsWith('.zip')) return zipPreviewData.value !== null;
+  return true;
+});
 const isDirty = computed(() => editorContent.value !== selectedContent.value && canEditSelected.value && !livePreview.value);
 
 const groupedFiles = computed(() => {
@@ -324,15 +343,28 @@ async function openFile(file) {
   try {
     selectedFile.value = file;
     livePreview.value = false;
-    if (file.endsWith('.zip')) {
-      selectedContent.value = '二进制压缩包：请使用右上角下载整包。';
-      editorContent.value = selectedContent.value;
+    if (!file.endsWith('.zip')) {
+      zipPreviewData.value = null;
+      selectedZipFile.value = '';
+      const text = await readFile(file);
+      selectedContent.value = text;
+      editorContent.value = text;
+      if (file === 'input/problem_raw.md') problemRaw.value = text;
       return;
     }
-    const text = await readFile(file);
-    selectedContent.value = text;
-    editorContent.value = text;
-    if (file === 'input/problem_raw.md') problemRaw.value = text;
+    zipPreviewData.value = null;
+    selectedZipFile.value = '';
+    selectedContent.value = '正在加载数据预览…';
+    editorContent.value = selectedContent.value;
+    const res = await fetch(`/api/workspaces/${workspaceId.value}/datas-preview`, {
+      headers: { 'x-workspace-token': workspaceToken.value }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'preview failed');
+    zipPreviewData.value = data;
+    selectedZipFile.value = data.files[0]?.name || '';
+    editorContent.value = data.contents[selectedZipFile.value] || '';
+    selectedContent.value = editorContent.value;
   } catch (error) {
     errorMessage.value = error.message;
   }
@@ -454,6 +486,15 @@ async function loadLogs() {
   }
 }
 
+function selectZipFile(name) {
+  if (!zipPreviewData.value) return;
+  selectedZipFile.value = name;
+  const content = zipPreviewData.value.contents[name];
+  const text = content !== null && content !== undefined ? content : '（二进制内容，无法预览）';
+  selectedContent.value = text;
+  editorContent.value = text;
+}
+
 async function downloadAll() {
   if (!workspaceId.value) return;
   const url = new URL(`/api/workspaces/${workspaceId.value}/download`, window.location.origin);
@@ -511,7 +552,7 @@ function syncMonacoOptions() {
 }
 
 function editorReadOnly() {
-  return !canEditSelected.value || livePreview.value || !editorIsText.value;
+  return !canEditSelected.value || livePreview.value || !editorIsText.value || isZipPreview.value;
 }
 
 function editorLanguage(file) {

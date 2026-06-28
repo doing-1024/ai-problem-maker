@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { ensureAppDirs, listWorkspaces, createWorkspace, getWorkspaceMeta, getWorkspaceMetaInternal, readWorkspaceFile, writeWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip, isAllowedReadablePath } from './workspace.js';
+import { ensureAppDirs, listWorkspaces, createWorkspace, getWorkspaceMeta, getWorkspaceMetaInternal, readWorkspaceFile, writeWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip, readDatasPreview, isAllowedReadablePath } from './workspace.js';
 import { generateProblem, generateSolution, generateDataPlan, runDataGenerator } from './tasks.js';
 import { subscribeWorkspace } from './events.js';
 
@@ -81,6 +81,17 @@ app.get('/api/workspaces/:id/download', async (req, res) => {
     res.download(zipPath, `${req.params.id}.zip`);
   } catch (error) {
     res.status(error.statusCode || 404).json({ error: error.message });
+  }
+});
+
+app.get('/api/workspaces/:id/datas-preview', async (req, res) => {
+  try {
+    await requireWorkspaceAccess(req, req.params.id);
+    const preview = await readDatasPreview(req.params.id);
+    if (!preview) return res.status(404).json({ error: 'datas.zip not found' });
+    res.json(preview);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 

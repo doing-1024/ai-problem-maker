@@ -281,6 +281,41 @@ button {
   background: var(--editor);
 }
 
+.zip-tabs {
+  height: 32px;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.zip-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.zip-tab:hover {
+  background: var(--panel);
+  color: #cccccc;
+}
+.zip-tab.active {
+  background: var(--editor);
+  color: #ffffff;
+  border-bottom: 2px solid var(--accent);
+}
+.zip-size {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .binary-viewer::selection,
 .log-view::selection {
   background: #264f78;

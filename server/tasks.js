@@ -555,6 +555,7 @@ export async function generateSolution(workspaceId) {
       ensureSolutionMarkdownStructure(markdown);
       assertSolutionTextLooksReasonable(markdown, cpp);
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
+      cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
       await verifySampleWithStd(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
@@ -1209,6 +1210,95 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
         }
       );
       current = extractCodeBlock(fixed, 'cpp') || fixed.trim() || current;
+    }
+  }
+  return current;
+}
+
+async function crossReviewStdCpp(workspaceId, cpp, problem) {
+  let current = String(cpp || '');
+  for (let round = 1; round <= 3; round += 1) {
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'solution', state: 'running',
+      message: `算法审查 ${round}/3`
+    });
+    const reviewerPrompt = [
+      {
+        role: 'system',
+        content: '你是严格的 OI 代码审查员。只找错误，不写空话。标记为 CODE_REVIEW。\n'
+          + '检查以下方面，每方面独立判断：\n'
+          + '1. 算法正确性：贪心策略是否存在反例？DP 转移是否正确？数据结构维护是否有效？\n'
+          + '2. 边界情况：数组越界、整数溢出、空队列/空容器访问、特殊值（如 -1, INF）处理\n'
+          + '3. 复杂度：最坏情况下时间复杂度是否在题目数据范围内可接受？\n'
+          + '4. 输入输出：读入格式是否与题面一致？变量类型是否匹配？\n'
+          + '输出第一行只能是 PASS 或 FAIL，第二行开始列出具体问题（含代码行号和原因）。'
+      },
+      {
+        role: 'user',
+        content: [
+          'CODE_REVIEW',
+          '题目：',
+          problem || '',
+          '',
+          '标程代码：',
+          current || ''
+        ].join('\n')
+      }
+    ];
+    const review = await callLLM(reviewerPrompt, {
+      temperature: 0.05,
+      maxTokens: 4096,
+      retries: 3,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'solution.log', `code review ${round}`, info);
+      },
+    });
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] review ${round}: ${review.slice(0, 500)}\n`);
+
+    if (/^\s*PASS\b/i.test(review)) {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] code review PASS in round ${round}\n`);
+      return current;
+    }
+
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'solution', state: 'running',
+      message: `正在按审查意见修复标程 ${round}/3`
+    });
+    const fixPrompt = [
+      {
+        role: 'system',
+        content: '你是 C++ 代码修复助手。根据审查意见修正代码中的错误。'
+          + '只输出修正后的完整 C++ 代码（```cpp 代码块），不要解释。'
+          + '审查意见中提到的反例场景必须正确解决，不可敷衍。'
+      },
+      {
+        role: 'user',
+        content: [
+          'CODE_FIX',
+          '题目：',
+          problem || '',
+          '',
+          '当前标程：',
+          current || '',
+          '',
+          '审查意见：',
+          review || ''
+        ].join('\n')
+      }
+    ];
+    const fixed = await callLLM(fixPrompt, {
+      temperature: 0.1,
+      maxTokens: 8192,
+      retries: 3,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'solution.log', `code fix ${round}`, info);
+      },
+    });
+    current = extractCodeBlock(fixed, 'cpp') || fixed.trim() || current;
+    try {
+      await verifyCppCompiles(workspaceId, current);
+    } catch (compileError) {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, retrying: ${compileError.message.slice(0, 300)}\n`);
     }
   }
   return current;

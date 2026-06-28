@@ -5,6 +5,7 @@ import archiver from 'archiver';
 import { createWriteStream } from 'fs';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import { spawn } from 'child_process';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DATA_DIR = process.env.WORKSPACE_STORAGE || path.join(ROOT, 'workspaces');
@@ -188,6 +189,37 @@ export async function readWorkspaceFile(id, rel) {
   const isZip = safeRel.endsWith('.zip');
   const data = await fs.readFile(abs, isZip ? null : 'utf8');
   return data;
+}
+
+export async function readDatasPreview(id) {
+  const zipPath = path.join(workspaceDir(id), 'data', 'datas.zip');
+  if (!(await exists(zipPath))) return null;
+  const script = [
+    'import json, sys, zipfile',
+    'zp = sys.argv[1]',
+    'with zipfile.ZipFile(zp, "r") as zf:',
+    '    names = sorted(zf.namelist())',
+    '    files = [{"name": n, "size": zf.getinfo(n).file_size} for n in names]',
+    '    contents = {}',
+    '    for n in names:',
+    '        try:',
+    '            contents[n] = zf.read(n).decode("utf-8")',
+    '        except:',
+    '            contents[n] = None',
+    '    print(json.dumps({"files": files, "contents": contents}))'
+  ].join('\n');
+  const stdout = await new Promise((resolve, reject) => {
+    const child = spawn('python3', ['-c', script, zipPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    child.stdout.on('data', d => out += d);
+    child.stderr.on('data', d => err += d);
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code !== 0) reject(new Error(err || `python exited ${code}`));
+      else resolve(out);
+    });
+  });
+  return JSON.parse(stdout);
 }
 
 export async function listWorkspaceFiles(id) {
