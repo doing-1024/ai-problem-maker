@@ -604,6 +604,8 @@ export async function generateDataPlan(workspaceId) {
       ensureDataPlanMarkdownStructure(plan);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
 
+      const problemMd = await safeRead(workspaceId, 'problem/problem.md');
+      const stdCpp = await safeRead(workspaceId, 'solution/std.cpp');
       const genPrompt = [
         {
           role: 'system',
@@ -612,10 +614,26 @@ export async function generateDataPlan(workspaceId) {
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '生成数据的规模必须对齐目标难度。',
             '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。',
-            '生成的数据文件（如 1.in）必须直接写入当前工作目录，不要创建子目录。'
+            '生成的数据文件（如 1.in）必须直接写入当前工作目录，不要创建子目录。',
+            '数据的输入格式必须严格对标给定 C++ 标程的 cin 读入顺序和数据类型，不可自创格式。'
           ].join('\n')
         },
-        { role: 'user', content: ['GEN_PY', diffInfo, 'SOURCE_TEXT:', plan || ''].filter(Boolean).join('\n') }
+        {
+          role: 'user',
+          content: [
+            'GEN_PY',
+            diffInfo,
+            '',
+            '题目描述与输入输出格式:',
+            problemMd ? problemMd.slice(0, 3000) : '',
+            '',
+            '数据方案:',
+            plan || '',
+            '',
+            'C++ 标程（以 cin 读入顺序为准）:',
+            stdCpp || '',
+          ].filter(Boolean).join('\n')
+        }
       ];
       let genPy = await callLLM(genPrompt, {
         temperature: 0.2,
