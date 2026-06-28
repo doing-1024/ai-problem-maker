@@ -556,6 +556,7 @@ export async function generateSolution(workspaceId) {
       assertSolutionTextLooksReasonable(markdown, cpp);
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
       cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
+      cpp = await verifyWithBruteForce(workspaceId, cpp, problem);
       await verifySampleWithStd(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
@@ -1302,6 +1303,194 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
     }
   }
   return current;
+}
+
+async function verifyWithBruteForce(workspaceId, stdCpp, problem) {
+  let currentStd = String(stdCpp || '');
+
+  for (let round = 1; round <= 2; round += 1) {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-brute-${workspaceId}-`));
+    try {
+      emitWorkspaceEvent(workspaceId, 'task:update', {
+        stage: 'solution', state: 'running',
+        message: `生成暴力对拍程序 ${round}/2`
+      });
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute force round ${round}\n`);
+
+      const bruteSrc = await callLLM([
+        {
+          role: 'system',
+          content: '你是 OI 暴力对拍程序生成器。'
+            + '写一个 C++ 暴力程序（brute.cpp），用于验证标程的正确性。'
+            + '暴力程序必须使用穷举/搜索等保证正确但可以很慢的算法，只要求在小数据（N ≤ 6）上正确。'
+            + '输出格式必须与标程完全一致。'
+            + '只输出 ```cpp 代码块，不要解释。标记为 BRUTE_GEN。'
+        },
+        {
+          role: 'user',
+          content: [
+            'BRUTE_GEN',
+            '题目：',
+            problem || '',
+            '',
+            '标程（供参考输入输出格式）：',
+            currentStd || ''
+          ].join('\n')
+        }
+      ], {
+        temperature: 0.15,
+        maxTokens: 8192,
+        retries: 3,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'solution.log', `brute gen ${round}`, info);
+        },
+      });
+
+      let bruteCpp = extractCodeBlock(bruteSrc, 'cpp') || bruteSrc.trim();
+      if (!bruteCpp) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute gen failed: no cpp block\n`);
+        return currentStd;
+      }
+
+      const stdPath = path.join(tmpDir, 'std');
+      const brutePath = path.join(tmpDir, 'brute');
+      await fs.writeFile(path.join(tmpDir, 'std.cpp'), currentStd, 'utf8');
+      await fs.writeFile(path.join(tmpDir, 'brute.cpp'), bruteCpp, 'utf8');
+      try {
+        await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'std.cpp'), '-o', stdPath], 60000);
+        await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'brute.cpp'), '-o', brutePath], 60000);
+      } catch (compileError) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute compile failed: ${compileError.message.slice(0, 300)}\n`);
+        return currentStd;
+      }
+
+      const testGen = await callLLM([
+        {
+          role: 'system',
+          content: '你是 OI 小数据生成器。写一个 Python 脚本，生成 N 组（N ≤ 5）小规模测试数据。'
+            + '数据必须严格对标题目的输入格式，N ≤ 6，值域尽量小。'
+            + '输出到 stdout，每组数据之间用一行 "===CASE===" 分隔。'
+            + '只输出纯 Python 代码（无 Markdown 包裹）。标记为 TEST_GEN。'
+        },
+        {
+          role: 'user',
+          content: [
+            'TEST_GEN',
+            '题目（含输入格式）：',
+            problem || '',
+            '',
+            '标程（参考输入格式）：',
+            currentStd || ''
+          ].join('\n')
+        }
+      ], {
+        temperature: 0.15,
+        maxTokens: 4096,
+        retries: 3,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'solution.log', `test gen ${round}`, info);
+        },
+      });
+
+      const genScript = extractPythonCode(testGen) || testGen.trim();
+      if (!genScript) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen failed: no python code\n`);
+        return currentStd;
+      }
+
+      let testOutput;
+      try {
+        testOutput = await runPython(genScript, 15000);
+      } catch (pyError) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen python error: ${pyError.message.slice(0, 200)}\n`);
+        return currentStd;
+      }
+
+      const testCases = testOutput.stdout.split('===CASE===').filter(s => s.trim());
+      if (testCases.length === 0) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] no test cases generated\n`);
+        return currentStd;
+      }
+
+      let mismatches = [];
+      for (let t = 0; t < testCases.length; t++) {
+        const input = testCases[t].trim();
+        const expected = await runStdWithInput(brutePath, input, 30000).catch(e => null);
+        const actual = await runStdWithInput(stdPath, input, 30000).catch(e => null);
+
+        if (expected === null || actual === null) {
+          mismatches.push({ case: t + 1, input, expected: expected === null ? 'brute crashed' : expected, actual: actual === null ? 'std crashed' : actual });
+          continue;
+        }
+        if (expected.trim() !== actual.trim()) {
+          mismatches.push({ case: t + 1, input, expected: expected.trim(), actual: actual.trim() });
+        }
+      }
+
+      if (mismatches.length === 0) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute ${testCases.length} cases all PASS\n`);
+        return currentStd;
+      }
+
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute ${mismatches.length}/${testCases.length} mismatches\n`);
+      for (const m of mismatches) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] case ${m.case}: expected=${m.expected} actual=${m.actual}\n`);
+      }
+
+      emitWorkspaceEvent(workspaceId, 'task:update', {
+        stage: 'solution', state: 'running',
+        message: `正在按对拍结果修复标程 ${round}/2`
+      });
+
+      const mismatchReport = mismatches.map(m =>
+        `测试点 ${m.case}:\n输入:\n${m.input}\n期望输出:\n${m.expected}\n实际输出:\n${m.actual}`
+      ).join('\n\n');
+
+      const fixed = await callLLM([
+        {
+          role: 'system',
+          content: '你是 C++ 标程修复助手。暴力对拍发现了标程输出与正确结果不一致的反例。'
+            + '根据反例修正标程中的算法错误。只输出修正后的完整 C++ 代码（```cpp 代码块），不要解释。标记为 BRUTE_FIX。'
+        },
+        {
+          role: 'user',
+          content: [
+            'BRUTE_FIX',
+            '题目：',
+            problem || '',
+            '',
+            '当前标程：',
+            currentStd || '',
+            '',
+            '暴力程序（正确但可能很慢）：',
+            bruteCpp || '',
+            '',
+            '不一致的反例：',
+            mismatchReport || ''
+          ].join('\n')
+        }
+      ], {
+        temperature: 0.15,
+        maxTokens: 8192,
+        retries: 3,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'solution.log', `brute fix ${round}`, info);
+        },
+      });
+
+      const newStd = extractCodeBlock(fixed, 'cpp') || fixed.trim();
+      if (newStd && newStd.length > 20) currentStd = newStd;
+
+      try {
+        await verifyCppCompiles(workspaceId, currentStd);
+      } catch {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation\n`);
+      }
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+  return currentStd;
 }
 
 async function verifySampleWithStd(workspaceId, stdCpp) {
