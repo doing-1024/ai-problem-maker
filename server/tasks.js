@@ -611,7 +611,8 @@ export async function generateDataPlan(workspaceId) {
             '你要根据数据方案写 Python 数据生成器。标记为 GEN_PY。',
             `难度分级参考：${DIFFICULTY_TAXONOMY}`,
             '生成数据的规模必须对齐目标难度。',
-            '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。'
+            '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。',
+            '生成的数据文件（如 1.in）必须直接写入当前工作目录，不要创建子目录。'
           ].join('\n')
         },
         { role: 'user', content: ['GEN_PY', diffInfo, 'SOURCE_TEXT:', plan || ''].filter(Boolean).join('\n') }
@@ -723,7 +724,7 @@ if proc.returncode != 0:
     print("gen.py failed (exit", proc.returncode, "):", stderr[-2000:], file=sys.stderr)
     sys.exit(1)
 
-in_files = sorted([p for p in out_dir.iterdir() if p.suffix == ".in"])
+in_files = sorted([p for p in out_dir.rglob("*.in")])
 if not in_files:
     print("no .in files generated; gen.py stdout:", stdout[-2000:], file=sys.stderr)
     sys.exit(1)
@@ -747,9 +748,9 @@ for in_file in in_files:
 # zip both .in and .out
 zip_path = work / "datas.zip"
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-    for p in sorted(out_dir.iterdir()):
+    for p in sorted(out_dir.rglob("*")):
         if p.is_file():
-            zf.write(p, p.name)
+            zf.write(p, p.relative_to(out_dir).as_posix())
 print("STDOUT_BEGIN")
 print(stdout)
 print("STDOUT_END")
