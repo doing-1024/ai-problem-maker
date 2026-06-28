@@ -680,22 +680,73 @@ export async function runDataGenerator(workspaceId) {
 
     await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start generator run\n`);
     emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在运行数据生成器' });
-    try {
-      const result = await executePythonGenerator(workspaceId, genPy, stdCpp);
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
-      assertDataZipLooksValid(result.zipContent);
-      await verifyZipArchive(result.zipContent);
-      await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
-      await saveJobResult(workspaceId, 'run', fingerprint, { resultPath: 'data/datas.zip' });
-      await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run finished\n`);
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据包已生成' });
-      return { artifact: 'data/datas.zip', cached: false, stdout: result.stdout, stderr: result.stderr };
-    } catch (error) {
-      await setState(workspaceId, 'data', 'error', error.message || 'run failed');
-      await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run failed: ${error.message}\n`);
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'error', message: error.message || 'run failed' });
-      throw error;
+
+    let currentStdCpp = stdCpp;
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await executePythonGenerator(workspaceId, genPy, currentStdCpp);
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
+        assertDataZipLooksValid(result.zipContent);
+        await verifyZipArchive(result.zipContent);
+        await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
+        await saveJobResult(workspaceId, 'run', fingerprint, { resultPath: 'data/datas.zip' });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] run finished\n`);
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据包已生成' });
+        return { artifact: 'data/datas.zip', cached: false, stdout: result.stdout, stderr: result.stderr };
+      } catch (error) {
+        lastError = error;
+        const errMsg = error.message || '';
+        const isRetryable = errMsg.includes('timed out') || errMsg.includes('std failed') || errMsg.includes('compile');
+        if (!isRetryable || attempt === 3) break;
+
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'data', state: 'running',
+          message: `正在修复标程运行错误 ${attempt}/3`
+        });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] fix std.cpp attempt ${attempt}/3: ${errMsg.slice(0, 1000)}\n`);
+
+        const problem = await safeRead(workspaceId, 'problem/problem.md');
+        const fixed = await callLLM(
+          [
+            {
+              role: 'system',
+              content: '你是 C++ 标程修复助手。根据下方的运行时错误修正标程代码。只输出修正后的完整 C++ 代码，不要 Markdown 包裹，不要解释。',
+            },
+            {
+              role: 'user',
+              content: [
+                '运行时错误:',
+                errMsg,
+                '',
+                '题目:',
+                problem || '',
+                '',
+                '当前标程代码:',
+                currentStdCpp || '',
+              ].join('\n'),
+            },
+          ],
+          {
+            temperature: 0.1,
+            timeoutMs: 60000,
+            maxTokens: 4096,
+            retries: 3,
+            onComplete: async info => {
+              await logLLMComplete(workspaceId, 'data.log', `std fix ${attempt}`, info);
+            },
+            onRetry: async ({ attempt: ra, retries, error }) => {
+              await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] std fix LLM retry ${ra + 1}/${retries}: ${error.message}\n`);
+            },
+          }
+        );
+        currentStdCpp = extractCodeBlock(fixed, 'cpp') || fixed.trim() || currentStdCpp;
+        await writeWorkspaceFile(workspaceId, 'solution/std.cpp', currentStdCpp);
+      }
     }
+
+    throw lastError || new Error('run failed');
   });
 }
 
@@ -738,8 +789,12 @@ if compile_proc.returncode != 0:
 # run std against each .in to produce .out
 for in_file in in_files:
     out_file = in_file.with_suffix(".out")
-    with open(in_file) as inf:
-        run_proc = subprocess.run([str(work / "std")], stdin=inf, capture_output=True, text=True, timeout=30)
+    try:
+        with open(in_file) as inf:
+            run_proc = subprocess.run([str(work / "std")], stdin=inf, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        print(f"std timed out on {in_file.relative_to(out_dir)} after 60s", file=sys.stderr)
+        sys.exit(1)
     if run_proc.returncode != 0:
         print(f"std failed on {in_file.name} (exit {run_proc.returncode}):\\n" + run_proc.stderr[-2000:], file=sys.stderr)
         sys.exit(1)
