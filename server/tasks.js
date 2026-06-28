@@ -720,39 +720,18 @@ proc = subprocess.run([sys.executable, str(work / "gen.py")], cwd=str(out_dir), 
 stdout = proc.stdout
 stderr = proc.stderr
 if proc.returncode != 0:
-    print("STDOUT_BEGIN")
-    print(stdout)
-    print("STDOUT_END")
-    print("STDERR_BEGIN")
-    print(stderr)
-    print("STDERR_END")
-    print("ZIP_BEGIN")
-    print("ZIP_END")
+    print("gen.py failed (exit", proc.returncode, "):", stderr[-2000:], file=sys.stderr)
     sys.exit(1)
 
 in_files = sorted([p for p in out_dir.iterdir() if p.suffix == ".in"])
 if not in_files:
-    print("STDOUT_BEGIN")
-    print(stdout)
-    print("STDOUT_END")
-    print("STDERR_BEGIN")
-    print("no .in files generated")
-    print("STDERR_END")
-    print("ZIP_BEGIN")
-    print("ZIP_END")
+    print("no .in files generated; gen.py stdout:", stdout[-2000:], file=sys.stderr)
     sys.exit(1)
 
 # compile std.cpp
 compile_proc = subprocess.run(["g++", "-std=c++17", "-O2", "-pipe", "-static", str(work / "std.cpp"), "-o", str(work / "std")], capture_output=True, text=True, timeout=60)
 if compile_proc.returncode != 0:
-    print("STDOUT_BEGIN")
-    print(stdout)
-    print("STDOUT_END")
-    print("STDERR_BEGIN")
-    print("compile failed:\\n" + compile_proc.stderr)
-    print("STDERR_END")
-    print("ZIP_BEGIN")
-    print("ZIP_END")
+    print("g++ compile failed:\\n" + compile_proc.stderr[-3000:], file=sys.stderr)
     sys.exit(1)
 
 # run std against each .in to produce .out
@@ -761,14 +740,7 @@ for in_file in in_files:
     with open(in_file) as inf:
         run_proc = subprocess.run([str(work / "std")], stdin=inf, capture_output=True, text=True, timeout=30)
     if run_proc.returncode != 0:
-        print("STDOUT_BEGIN")
-        print(stdout)
-        print("STDOUT_END")
-        print("STDERR_BEGIN")
-        print(f"std failed on {in_file.name}:\\n" + run_proc.stderr)
-        print("STDERR_END")
-        print("ZIP_BEGIN")
-        print("ZIP_END")
+        print(f"std failed on {in_file.name} (exit {run_proc.returncode}):\\n" + run_proc.stderr[-2000:], file=sys.stderr)
         sys.exit(1)
     out_file.write_text(run_proc.stdout)
 
@@ -823,7 +795,8 @@ function runPython(code, timeoutMs = 30000) {
     child.on('close', code => {
       clearTimeout(timer);
       if (code !== 0) {
-        reject(new Error(stderr || `python exited with ${code}`));
+        const msg = stderr || `process exited with code ${code}`;
+        reject(new Error(msg));
         return;
       }
       resolve({ stdout, stderr });
