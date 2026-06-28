@@ -951,12 +951,10 @@ function ensureProblemMarkdownStructure(text) {
 }
 
 async function repairSolutionOutput(workspaceId, finalText, problem, diffInfo) {
-  const requiredHeaders = ['## 思路', '## 正确性', '## 复杂度'];
-  const markdown = stripCppBlock(finalText);
+  const content = stripCppBlock(finalText);
   const cpp = extractCodeBlock(finalText, 'cpp');
-  const missing = requiredHeaders.filter(header => !markdown.includes(header));
-  if (!markdown.trim()) missing.push('缺少题解 Markdown');
-  if (!/^#\s+\S+/m.test(markdown)) missing.push('缺少一级标题');
+  const missing = getSolutionContentIssues(content);
+  if (!content.trim()) missing.push('缺少题解 Markdown');
   if (!cpp) missing.push('缺少 C++ 标程代码块');
   if (!missing.length) return finalText;
 
@@ -1021,7 +1019,68 @@ async function repairSolutionOutput(workspaceId, finalText, problem, diffInfo) {
 }
 
 function ensureSolutionMarkdownStructure(text) {
-  ensureMarkdownStructure(text, ['title', '## 思路', '## 正确性', '## 复杂度']);
+  const content = String(text || '').trim();
+  if (!content) {
+    const error = new Error('markdown missing level-1 title');
+    error.statusCode = 422;
+    throw error;
+  }
+  const issues = getSolutionContentIssues(content);
+  if (issues.length) {
+    const error = new Error(`solution content issue: ${issues.join('; ')}`);
+    error.statusCode = 422;
+    throw error;
+  }
+}
+
+function getSolutionContentIssues(text) {
+  const content = String(text || '');
+  const issues = [];
+  if (!content.trim()) { issues.push('输出为空'); return issues; }
+  if (!/^#\s+\S+/m.test(content)) issues.push('缺少一级标题');
+  if (!hasAlgorithmDescription(content)) issues.push('缺少算法/思路描述');
+  if (!hasCorrectnessArgument(content)) issues.push('缺少正确性论证');
+  if (!hasComplexityAnalysis(content)) issues.push('缺少复杂度分析');
+  if (/(\.\.\.|……|未完|待补|待续|省略号)/.test(content)) issues.push('含有省略或待补标记');
+  const fenceCount = (content.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) issues.push('代码块未闭合');
+  return issues;
+}
+
+function hasAlgorithmDescription(text) {
+  const headers = ['思路', '解法', '解题思路', '算法思路', '算法分析', '算法描述', 'Approach', 'Algorithm', 'Solution'];
+  if (headers.some(h => text.includes(`## ${h}`) || text.includes(`### ${h}`))) return true;
+  const patterns = [
+    /(首先|然后|接着|最后|步骤|分为.*步|方法|策略|算法|贪心|DP|动态规划|二分|搜索|递归|迭代|遍历|构造|模拟|排序|分治)/,
+    /(先.*再.*最[终后]|核心思想|主要思路|解题思路|算法流程)/,
+    /we (can|will|use|apply|adopt|propose|design|consider)/i,
+    /algorithm|approach|solution|method/i,
+  ];
+  return patterns.some(p => p.test(text));
+}
+
+function hasCorrectnessArgument(text) {
+  const headers = ['正确性', '正确性证明', '正确性分析', '证明', 'Proof', 'Correctness'];
+  if (headers.some(h => text.includes(`## ${h}`) || text.includes(`### ${h}`))) return true;
+  const patterns = [
+    /(证明|正确性|充分性|必要性|归纳|反证|反例|矛盾|成立|必然|显然|因此|所以|因为.*所以|由于|故|从而|可得|则.*成立)/,
+    /(correctness|proof|prove|valid|invariant|induction|contradiction|suffice|necessary|hence|therefore|thus|consequently)/i,
+    /(可以证明|不难证明|易证|需证|要证|只需|考虑.*情况|分[类情].*讨论|边界.*情况|特例)/,
+  ];
+  return patterns.some(p => p.test(text));
+}
+
+function hasComplexityAnalysis(text) {
+  const headers = ['复杂度', '复杂度分析', '时空复杂度', '时间复杂度', '空间复杂度', 'Complexity', 'Time complexity', 'Space complexity'];
+  if (headers.some(h => text.includes(`## ${h}`) || text.includes(`### ${h}`))) return true;
+  const patterns = [
+    /(复杂度|时间.*复杂度|空间.*复杂度|时空.*复杂度|时间.*空间)/,
+    /\$?O\s*\(/,
+    /\bO\(n|\bO\(log|\bO\(N|\bO\(1/,
+    /(complexity|time\s*(and\s*space)?|space\s*complexity)/i,
+    /(线性|对数|指数|多项式|平方|立方|常数|\$n\$\s*\(?\$?m\$?)/,
+  ];
+  return patterns.some(p => p.test(text));
 }
 
 async function repairDataPlanOutput(workspaceId, plan, solution, diffInfo) {
