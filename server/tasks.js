@@ -556,7 +556,7 @@ export async function generateSolution(workspaceId) {
       assertSolutionTextLooksReasonable(markdown, cpp);
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
       cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
-      cpp = await verifyWithBruteForce(workspaceId, cpp, problem);
+      cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
       await verifySampleWithStd(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
@@ -1305,72 +1305,81 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
   return current;
 }
 
-async function verifyWithBruteForce(workspaceId, stdCpp, problem) {
-  let currentStd = String(stdCpp || '');
+async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
+  let primaryStd = String(stdCpp || '');
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-dual-${workspaceId}-`));
+  try {
+    const primaryPath = path.join(tmpDir, 'primary');
+    const secondaryPath = path.join(tmpDir, 'secondary');
 
-  for (let round = 1; round <= 2; round += 1) {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-brute-${workspaceId}-`));
-    try {
+    const writeAndCompile = async (code, outPath, label) => {
+      await fs.writeFile(outPath + '.cpp', code, 'utf8');
+      await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', outPath + '.cpp', '-o', outPath], 60000);
+    };
+
+    await writeAndCompile(primaryStd, primaryPath, 'primary');
+
+    for (let round = 1; round <= 3; round += 1) {
       emitWorkspaceEvent(workspaceId, 'task:update', {
         stage: 'solution', state: 'running',
-        message: `生成暴力对拍程序 ${round}/2`
+        message: `双解法对拍验证 ${round}/3`
       });
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute force round ${round}\n`);
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] dual round ${round}\n`);
 
-      const bruteSrc = await callLLM([
+      const altSol = await callLLM([
         {
           role: 'system',
-          content: '你是 OI 暴力对拍程序生成器。'
-            + '写一个 C++ 暴力程序（brute.cpp），用于验证标程的正确性。'
-            + '暴力程序必须使用穷举/搜索等保证正确但可以很慢的算法，只要求在小数据（N ≤ 6）上正确。'
-            + '输出格式必须与标程完全一致。'
-            + '只输出 ```cpp 代码块，不要解释。标记为 BRUTE_GEN。'
+          content: [
+            '你是 OI 标程生成器。写一个与已有标程**算法范式完全不同**的 C++ 解法。',
+            '标记为 ALT_SOL。只输出 ```cpp 代码块，不要解释。',
+            '具体要求：',
+            '- 如果已有代码用贪心，你用 DP 或树上倍增；如果已有代码用 DP，你用贪心或数据结构维护',
+            '- 输入输出格式必须与已有代码完全一致',
+            '- 你写的解法应该是独立的正确解法（不依赖已有代码）',
+          ].join('\n')
         },
         {
           role: 'user',
           content: [
-            'BRUTE_GEN',
+            'ALT_SOL',
             '题目：',
             problem || '',
             '',
-            '标程（供参考输入输出格式）：',
-            currentStd || ''
+            '已有标程（用于参考输入输出格式，不要复制其算法）：',
+            primaryStd || ''
           ].join('\n')
         }
       ], {
-        temperature: 0.15,
+        temperature: 0.4,
         maxTokens: 8192,
         retries: 3,
         onComplete: async info => {
-          await logLLMComplete(workspaceId, 'solution.log', `brute gen ${round}`, info);
+          await logLLMComplete(workspaceId, 'solution.log', `alt ${round}`, info);
         },
       });
 
-      let bruteCpp = extractCodeBlock(bruteSrc, 'cpp') || bruteSrc.trim();
-      if (!bruteCpp) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute gen failed: no cpp block\n`);
-        return currentStd;
+      let altCpp = extractCodeBlock(altSol, 'cpp') || altSol.trim();
+      if (!altCpp) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] alt gen failed\n`);
+        return primaryStd;
       }
 
-      const stdPath = path.join(tmpDir, 'std');
-      const brutePath = path.join(tmpDir, 'brute');
-      await fs.writeFile(path.join(tmpDir, 'std.cpp'), currentStd, 'utf8');
-      await fs.writeFile(path.join(tmpDir, 'brute.cpp'), bruteCpp, 'utf8');
       try {
-        await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'std.cpp'), '-o', stdPath], 60000);
-        await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'brute.cpp'), '-o', brutePath], 60000);
-      } catch (compileError) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute compile failed: ${compileError.message.slice(0, 300)}\n`);
-        return currentStd;
+        await writeAndCompile(altCpp, secondaryPath, 'secondary');
+      } catch {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] alt compile failed\n`);
+        return primaryStd;
       }
 
       const testGen = await callLLM([
         {
           role: 'system',
-          content: '你是 OI 小数据生成器。写一个 Python 脚本，生成 N 组（N ≤ 5）小规模测试数据。'
-            + '数据必须严格对标题目的输入格式，N ≤ 6，值域尽量小。'
-            + '输出到 stdout，每组数据之间用一行 "===CASE===" 分隔。'
-            + '只输出纯 Python 代码（无 Markdown 包裹）。标记为 TEST_GEN。'
+          content: [
+            '写一个 Python 脚本生成 3 组小规模随机测试数据。',
+            '数据格式必须严格对标题目输入格式，N ≤ 5，值域尽量小。',
+            '每组输出到 stdout，组间用 "===CASE===" 分隔。',
+            '只输出纯 Python 代码，无 Markdown 包裹。标记为 TEST_GEN。'
+          ].join('\n')
         },
         {
           role: 'user',
@@ -1380,7 +1389,7 @@ async function verifyWithBruteForce(workspaceId, stdCpp, problem) {
             problem || '',
             '',
             '标程（参考输入格式）：',
-            currentStd || ''
+            primaryStd || ''
           ].join('\n')
         }
       ], {
@@ -1388,109 +1397,109 @@ async function verifyWithBruteForce(workspaceId, stdCpp, problem) {
         maxTokens: 4096,
         retries: 3,
         onComplete: async info => {
-          await logLLMComplete(workspaceId, 'solution.log', `test gen ${round}`, info);
+          await logLLMComplete(workspaceId, 'solution.log', `test gen dual ${round}`, info);
         },
       });
 
       const genScript = extractPythonCode(testGen) || testGen.trim();
       if (!genScript) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen failed: no python code\n`);
-        return currentStd;
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen failed\n`);
+        return primaryStd;
       }
 
       let testOutput;
       try {
         testOutput = await runPython(genScript, 15000);
-      } catch (pyError) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen python error: ${pyError.message.slice(0, 200)}\n`);
-        return currentStd;
+      } catch {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen python error\n`);
+        return primaryStd;
       }
 
-      const testCases = testOutput.stdout.split('===CASE===').filter(s => s.trim());
-      if (testCases.length === 0) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] no test cases generated\n`);
-        return currentStd;
+      const cases = testOutput.stdout.split('===CASE===').filter(s => s.trim());
+      if (cases.length < 2) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] too few cases (${cases.length})\n`);
+        return primaryStd;
       }
 
-      let mismatches = [];
-      for (let t = 0; t < testCases.length; t++) {
-        const input = testCases[t].trim();
-        const expected = await runStdWithInput(brutePath, input, 30000).catch(e => null);
-        const actual = await runStdWithInput(stdPath, input, 30000).catch(e => null);
-
-        if (expected === null || actual === null) {
-          mismatches.push({ case: t + 1, input, expected: expected === null ? 'brute crashed' : expected, actual: actual === null ? 'std crashed' : actual });
-          continue;
-        }
-        if (expected.trim() !== actual.trim()) {
-          mismatches.push({ case: t + 1, input, expected: expected.trim(), actual: actual.trim() });
+      let disagreements = [];
+      for (let t = 0; t < cases.length; t++) {
+        const input = cases[t].trim();
+        const outA = await runStdWithInput(primaryPath, input, 30000).catch(e => 'ERR:' + e.message);
+        const outB = await runStdWithInput(secondaryPath, input, 30000).catch(e => 'ERR:' + e.message);
+        if (outA.trim() !== outB.trim()) {
+          disagreements.push({ index: t + 1, input, outputA: outA.trim(), outputB: outB.trim() });
         }
       }
 
-      if (mismatches.length === 0) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute ${testCases.length} cases all PASS\n`);
-        return currentStd;
+      if (disagreements.length === 0) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] dual: ${cases.length} cases all AGREE\n`);
+        return primaryStd;
       }
 
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute ${mismatches.length}/${testCases.length} mismatches\n`);
-      for (const m of mismatches) {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] case ${m.case}: expected=${m.expected} actual=${m.actual}\n`);
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] dual: ${disagreements.length}/${cases.length} disagree\n`);
+      for (const d of disagreements) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] case ${d.index}: A=${d.outputA} B=${d.outputB}\n`);
       }
 
       emitWorkspaceEvent(workspaceId, 'task:update', {
         stage: 'solution', state: 'running',
-        message: `正在按对拍结果修复标程 ${round}/2`
+        message: `正在修复算法分歧 ${round}/3`
       });
 
-      const mismatchReport = mismatches.map(m =>
-        `测试点 ${m.case}:\n输入:\n${m.input}\n期望输出:\n${m.expected}\n实际输出:\n${m.actual}`
+      const report = disagreements.map(d =>
+        `测试 ${d.index}:\n输入:\n${d.input}\n解法A(主)输出:\n${d.outputA}\n解法B(备)输出:\n${d.outputB}`
       ).join('\n\n');
 
       const fixed = await callLLM([
         {
           role: 'system',
-          content: '你是 C++ 标程修复助手。暴力对拍发现了标程输出与正确结果不一致的反例。'
-            + '根据反例修正标程中的算法错误。只输出修正后的完整 C++ 代码（```cpp 代码块），不要解释。标记为 BRUTE_FIX。'
+          content: [
+            '你是 OI 标程审查员。主解法（A）和备用解法（B）在一些测试上的输出不一致。',
+            '分析不一致的原因，判断哪种解法正确，然后**只输出修正后的主解法完整 C++ 代码**（```cpp 代码块）。',
+            '备用解法仅作参考，可能有自己的错误，不要直接复制备用解法的代码。',
+            '标记为 DUAL_FIX。'
+          ].join('\n')
         },
         {
           role: 'user',
           content: [
-            'BRUTE_FIX',
+            'DUAL_FIX',
             '题目：',
             problem || '',
             '',
-            '当前标程：',
-            currentStd || '',
+            '当前主解法(A)：',
+            primaryStd || '',
             '',
-            '暴力程序（正确但可能很慢）：',
-            bruteCpp || '',
+            '备用解法(B)：',
+            altCpp || '',
             '',
-            '不一致的反例：',
-            mismatchReport || ''
+            '不一致的测试：',
+            report || ''
           ].join('\n')
         }
       ], {
-        temperature: 0.15,
+        temperature: 0.1,
         maxTokens: 8192,
         retries: 3,
         onComplete: async info => {
-          await logLLMComplete(workspaceId, 'solution.log', `brute fix ${round}`, info);
+          await logLLMComplete(workspaceId, 'solution.log', `dual fix ${round}`, info);
         },
       });
 
-      const newStd = extractCodeBlock(fixed, 'cpp') || fixed.trim();
-      if (newStd && newStd.length > 20) currentStd = newStd;
-
-      try {
-        await verifyCppCompiles(workspaceId, currentStd);
-      } catch {
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation\n`);
+      const newCode = extractCodeBlock(fixed, 'cpp') || fixed.trim();
+      if (newCode && newCode.length > 20) {
+        primaryStd = newCode;
+        try {
+          await writeAndCompile(primaryStd, primaryPath, 'primary');
+        } catch {
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation\n`);
+        }
       }
-    } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true });
     }
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
   }
-  return currentStd;
+  return primaryStd;
 }
 
 async function verifySampleWithStd(workspaceId, stdCpp) {
