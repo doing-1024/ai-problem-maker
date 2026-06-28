@@ -1375,8 +1375,10 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
         {
           role: 'system',
           content: [
-            '写一个 Python 脚本生成 3 组小规模随机测试数据。',
-            '数据格式必须严格对标题目输入格式，N ≤ 5，值域尽量小。',
+            '写一个 Python 脚本生成 5 组小规模随机测试数据。',
+            '数据格式必须严格对标题目输入格式。',
+            'N 的规模由你根据题目复杂度把控：简单问题 N=5~10，中等问题 N=8~15，复杂问题 N=12~20。',
+            '值域尽量小以便人工核对（如价格 ≤ 20，容量 ≤ 20）。',
             '每组输出到 stdout，组间用 "===CASE===" 分隔。',
             '只输出纯 Python 代码，无 Markdown 包裹。标记为 TEST_GEN。'
           ].join('\n')
