@@ -103,7 +103,7 @@
             <option value="same">参考原题，强改背景</option>
             <option value="custom">用户自行设定</option>
           </select>
-          <input v-model="difficultyText" placeholder="目标难度，如 NOIP T2 / 省选入门" />
+          <input v-if="difficultyMode === 'custom'" v-model="difficultyText" placeholder="目标难度，如 NOIP T2 / 省选入门" />
           <textarea v-model="problemRaw" class="source-input" placeholder="原题素材，可从 input/problem_raw.md 载入或直接粘贴"></textarea>
           <button class="button primary block" @click="saveProblemRaw">保存原题素材</button>
         </section>
