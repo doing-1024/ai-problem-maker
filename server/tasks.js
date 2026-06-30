@@ -520,55 +520,43 @@ export async function generateSolution(workspaceId) {
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'critic', text: critique.slice(0, 320) });
 
-      const revisePrompt = [
-        {
-          role: 'system',
-          content: [
-            '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。',
-            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-            '算法分析、复杂度推导必须与目标难度匹配，注意思维链深度要对齐。',
-            '输出必须严格包含中文 Markdown 章节：# 题解、## 思路、## 正确性、## 复杂度。',
-            '最后必须包含一个 ```cpp 代码块，代码块内是完整 C++17 标程。'
-          ].join('\n')
-        },
-        {
-          role: 'user',
-          content: ['SOLUTION_FINAL', diffInfo, 'SOURCE_TEXT:', problem || '', 'DRAFT:', draft || '', 'CRITIQUE:', critique || ''].filter(Boolean).join('\n')
-        }
-      ];
-      const finalText = await callLLM(revisePrompt, {
-        temperature: 0.2,
-        retries: 5,
-        onRetry: async ({ attempt, retries, error }) => {
+      let lastFailure = '';
+      for (let candidate = 1; candidate <= 3; candidate += 1) {
+        try {
           emitWorkspaceEvent(workspaceId, 'task:update', {
             stage: 'solution',
             state: 'running',
-            message: `题解修订重试 ${attempt + 1}/${retries}`
+            message: `正在生成题解候选 ${candidate}/3`
           });
-          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] final retry ${attempt + 1}/${retries}: ${error.message}\n`);
+          const finalText = await generateSolutionCandidate(workspaceId, {
+            problem,
+            draft,
+            critique,
+            diffInfo,
+            lastFailure,
+            candidate
+          });
+          emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
+          const { markdown, cpp } = await validateSolutionCandidate(workspaceId, finalText, problem, diffInfo);
+          await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
+          await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
+          await saveJobResult(workspaceId, 'solution', fingerprint, {
+            resultPaths: ['solution/solution.md', 'solution/std.cpp']
+          });
+          await setState(workspaceId, 'solution', 'done', '题解与标程已生成');
+          emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'done', message: '题解与标程已生成' });
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] done\n`);
+          return { markdown, cpp, cached: false, critique };
+        } catch (candidateError) {
+          lastFailure = String(candidateError?.message || candidateError || '').slice(0, 4000);
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] candidate ${candidate}/3 failed: ${lastFailure}\n`);
+          if (candidate === 3) {
+            const error = new Error(`solution quality gates failed after 3 candidates: ${lastFailure}`);
+            error.statusCode = candidateError.statusCode || 422;
+            throw error;
+          }
         }
-      });
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'final', text: finalText.slice(0, 320) });
-      const repaired = await repairSolutionOutput(workspaceId, finalText, problem, diffInfo);
-      let cpp = extractCodeBlock(repaired, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
-      const markdown = stripCppBlock(repaired);
-      ensureSolutionMarkdownStructure(markdown);
-      assertSolutionTextLooksReasonable(markdown, cpp);
-      cpp = await repairCppCompilation(workspaceId, cpp, problem);
-      cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
-      cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
-      await verifyWithBruteOracle(workspaceId, cpp, problem);
-      await verifyFullScoreReview(workspaceId, markdown, cpp, problem, diffInfo);
-      await verifySampleWithStd(workspaceId, cpp);
-      await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
-      await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
-      await saveJobResult(workspaceId, 'solution', fingerprint, {
-        resultPaths: ['solution/solution.md', 'solution/std.cpp']
-      });
-      await setState(workspaceId, 'solution', 'done', '题解与标程已生成');
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'done', message: '题解与标程已生成' });
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] done\n`);
-      return { markdown, cpp, cached: false, critique };
+      }
     } catch (error) {
       await setState(workspaceId, 'solution', 'error', error.message || 'solution failed');
       emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'error', message: error.message || 'solution failed' });
@@ -576,6 +564,70 @@ export async function generateSolution(workspaceId) {
       throw error;
     }
   });
+}
+
+async function generateSolutionCandidate(workspaceId, { problem, draft, critique, diffInfo, lastFailure, candidate }) {
+  const system = [
+    '你是 OI 题解修订员，根据审校意见修订并输出最终 Markdown 和 cpp。标记为 SOLUTION_FINAL。',
+    `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+    '算法分析、复杂度推导必须与目标难度匹配，注意思维链深度要对齐。',
+    '输出必须严格包含中文 Markdown 章节：# 题解、## 思路、## 正确性、## 复杂度。',
+    '最后必须包含一个 ```cpp 代码块，代码块内是完整 C++17 标程。',
+    '标程必须是满分 AC 解法；不要输出部分分、暴力、伪代码或未经证明的贪心。',
+    '如果上一候选失败，必须换一种完整设计重新生成，不要只做局部补丁。'
+  ];
+  const user = [
+    'SOLUTION_FINAL',
+    `候选编号: ${candidate}/3`,
+    diffInfo,
+    'SOURCE_TEXT:',
+    problem || '',
+    'DRAFT:',
+    draft || '',
+    'CRITIQUE:',
+    critique || ''
+  ];
+  if (lastFailure) {
+    user.push(
+      'PREVIOUS_CANDIDATE_FAILURE:',
+      lastFailure,
+      '请根据上述失败原因重新设计题解和标程。若失败原因涉及算法复杂度或核心正确性，不要沿用原算法框架。'
+    );
+  }
+  const finalText = await callLLM([
+    { role: 'system', content: system.join('\n') },
+    { role: 'user', content: user.filter(Boolean).join('\n') }
+  ], {
+    temperature: candidate === 1 ? 0.2 : 0.35,
+    retries: 5,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', `final candidate ${candidate}`, info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      emitWorkspaceEvent(workspaceId, 'task:update', {
+        stage: 'solution',
+        state: 'running',
+        message: `题解候选 ${candidate} 重试 ${attempt + 1}/${retries}`
+      });
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] final candidate ${candidate} retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  return finalText;
+}
+
+async function validateSolutionCandidate(workspaceId, finalText, problem, diffInfo) {
+  const repaired = await repairSolutionOutput(workspaceId, finalText, problem, diffInfo);
+  let cpp = extractCodeBlock(repaired, 'cpp') || '#include <bits/stdc++.h>\nint main(){return 0;}\n';
+  const markdown = stripCppBlock(repaired);
+  ensureSolutionMarkdownStructure(markdown);
+  assertSolutionTextLooksReasonable(markdown, cpp);
+  cpp = await repairCppCompilation(workspaceId, cpp, problem);
+  cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
+  cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
+  await verifyWithBruteOracle(workspaceId, cpp, problem);
+  await verifyFullScoreReview(workspaceId, markdown, cpp, problem, diffInfo);
+  await verifySampleWithStd(workspaceId, cpp);
+  return { markdown, cpp };
 }
 
 export async function generateDataPlan(workspaceId) {
@@ -1226,6 +1278,7 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
 
 async function crossReviewStdCpp(workspaceId, cpp, problem) {
   let current = String(cpp || '');
+  const reviews = [];
   for (let round = 1; round <= 3; round += 1) {
     emitWorkspaceEvent(workspaceId, 'task:update', {
       stage: 'solution', state: 'running',
@@ -1263,6 +1316,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       },
     });
     await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] review ${round}: ${review.slice(0, 500)}\n`);
+    reviews.push(`Round ${round}:\n${review}`);
 
     if (/^\s*PASS\b/i.test(review)) {
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] code review PASS in round ${round}\n`);
@@ -1311,7 +1365,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       if (round === 3) throw compileError;
     }
   }
-  const error = new Error('code review did not reach PASS after 3 rounds');
+  const error = new Error(`code review did not reach PASS after 3 rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
   error.statusCode = 422;
   throw error;
 }
