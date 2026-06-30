@@ -557,6 +557,8 @@ export async function generateSolution(workspaceId) {
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
       cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
       cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
+      await verifyWithBruteOracle(workspaceId, cpp, problem);
+      await verifyFullScoreReview(workspaceId, markdown, cpp, problem, diffInfo);
       await verifySampleWithStd(workspaceId, cpp);
       await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
       await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
@@ -799,6 +801,12 @@ export async function runDataGenerator(workspaceId) {
     throw lastError || new Error('run failed');
   });
 }
+
+export const __testHooks = {
+  verifySampleWithStd,
+  verifyWithBruteOracle,
+  verifyFullScoreReview
+};
 
 async function executePythonGenerator(workspaceId, genPy, stdCpp) {
   const root = path.resolve(process.cwd(), 'workspaces', workspaceId);
@@ -1300,9 +1308,12 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       await verifyCppCompiles(workspaceId, current);
     } catch (compileError) {
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, retrying: ${compileError.message.slice(0, 300)}\n`);
+      if (round === 3) throw compileError;
     }
   }
-  return current;
+  const error = new Error('code review did not reach PASS after 3 rounds');
+  error.statusCode = 422;
+  throw error;
 }
 
 async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
@@ -1361,14 +1372,15 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
       let altCpp = extractCodeBlock(altSol, 'cpp') || altSol.trim();
       if (!altCpp) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] alt gen failed\n`);
-        return primaryStd;
+        continue;
       }
 
       try {
         await writeAndCompile(altCpp, secondaryPath, 'secondary');
-      } catch {
+      } catch (compileError) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] alt compile failed\n`);
-        return primaryStd;
+        if (round === 3) throw compileError;
+        continue;
       }
 
       const testGen = await callLLM([
@@ -1412,15 +1424,16 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
       let testOutput;
       try {
         testOutput = await runPython(genScript, 15000);
-      } catch {
+      } catch (testGenError) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen python error\n`);
-        return primaryStd;
+        if (round === 3) throw testGenError;
+        continue;
       }
 
       const cases = testOutput.stdout.split('===CASE===').filter(s => s.trim());
       if (cases.length < 2) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] too few cases (${cases.length})\n`);
-        return primaryStd;
+        continue;
       }
 
       let disagreements = [];
@@ -1501,7 +1514,165 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
-  return primaryStd;
+  const error = new Error('dual solution verification did not produce an agreeing independent check');
+  error.statusCode = 422;
+  throw error;
+}
+
+async function verifyWithBruteOracle(workspaceId, stdCpp, problem) {
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'solution',
+    state: 'running',
+    message: '正在用暴力 oracle 对拍标程'
+  });
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute oracle verification start\n`);
+
+  const oracleText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 暴力正确性 oracle 编写助手。必须写一个只用于小规模测试的朴素 C++17 解法。',
+        '优先正确性，不追求效率；可以枚举、搜索、模拟、 Floyd、暴力 DP，但必须严格匹配题面输入输出。',
+        '必须覆盖所有操作类型和边界情况；不要复用或照抄标程算法。',
+        '只输出 ```cpp 代码块，不要解释。标记为 BRUTE_ORACLE。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: ['BRUTE_ORACLE', '题目:', problem || '', '待验证标程:', stdCpp || ''].join('\n')
+    }
+  ], {
+    temperature: 0.15,
+    timeoutMs: 90000,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', 'brute oracle', info);
+    }
+  });
+
+  const generatorText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 对拍数据生成器编写助手。根据题面写 Python3 脚本，生成至少 80 组小规模合法测试。',
+        '每组测试必须是完整输入，输出到 stdout，组间用一行 ===CASE=== 分隔。',
+        '必须覆盖随机、最小规模、最大的小规模、特殊结构、边界值、所有操作类型。',
+        '规模要足够小，保证暴力 oracle 可以在 2 秒内处理每组。',
+        '只输出纯 Python 代码，不要 Markdown 包裹。标记为 BRUTE_TEST_GEN。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: ['BRUTE_TEST_GEN', '题目:', problem || '', '标程（参考输入格式）:', stdCpp || ''].join('\n')
+    }
+  ], {
+    temperature: 0.25,
+    timeoutMs: 90000,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', 'brute test gen', info);
+    }
+  });
+
+  const oracleCpp = extractCodeBlock(oracleText, 'cpp') || oracleText.trim();
+  const genPy = extractPythonCode(generatorText) || generatorText.trim();
+  if (!oracleCpp || !genPy) {
+    const error = new Error('brute oracle or test generator missing');
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-oracle-${workspaceId}-`));
+  try {
+    const stdPath = path.join(tmpDir, 'std');
+    const oraclePath = path.join(tmpDir, 'oracle');
+    await fs.writeFile(stdPath + '.cpp', stdCpp, 'utf8');
+    await fs.writeFile(oraclePath + '.cpp', oracleCpp, 'utf8');
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', stdPath + '.cpp', '-o', stdPath], 60000);
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', oraclePath + '.cpp', '-o', oraclePath], 60000);
+
+    const generated = await runPython(genPy, 30000);
+    const cases = generated.stdout.split('===CASE===').map(s => s.trim()).filter(Boolean);
+    if (cases.length < 80) {
+      const error = new Error(`brute test generator produced too few cases (${cases.length})`);
+      error.statusCode = 422;
+      throw error;
+    }
+
+    const disagreements = [];
+    for (let i = 0; i < cases.length; i += 1) {
+      const input = cases[i];
+      const stdOut = await runStdWithInput(stdPath, input, 30000).catch(e => `ERR:${e.message}`);
+      const oracleOut = await runStdWithInput(oraclePath, input, 30000).catch(e => `ERR:${e.message}`);
+      if (normalizeJudgeOutput(stdOut) !== normalizeJudgeOutput(oracleOut)) {
+        disagreements.push({ index: i + 1, input, stdOut: stdOut.trim(), oracleOut: oracleOut.trim() });
+        if (disagreements.length >= 5) break;
+      }
+    }
+
+    if (disagreements.length) {
+      for (const d of disagreements) {
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] oracle disagree case ${d.index}: std=${d.stdOut.slice(0, 300)} oracle=${d.oracleOut.slice(0, 300)}\n`);
+      }
+      const error = new Error(`brute oracle verification failed with ${disagreements.length} disagreement(s)`);
+      error.statusCode = 422;
+      throw error;
+    }
+
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] brute oracle verification passed ${cases.length} cases\n`);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyFullScoreReview(workspaceId, markdown, cpp, problem, diffInfo) {
+  emitWorkspaceEvent(workspaceId, 'task:update', {
+    stage: 'solution',
+    state: 'running',
+    message: '正在审查满分复杂度与 AC 风险'
+  });
+  const review = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是严格的 OI 标程终审员。目标是判断这份题解和 C++ 标程是否能在题面最大数据范围下作为满分 AC 正解。',
+        '必须独立检查：输入输出格式、算法正确性、边界情况、整数溢出、递归深度、最坏时间复杂度、空间复杂度。',
+        '如果只能通过部分分、复杂度不满足最大数据、证明缺口明显、或无法确认，请输出 FAIL。',
+        '第一行只能是 PASS 或 FAIL；后续列出具体理由。标记为 FULL_AC_REVIEW。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'FULL_AC_REVIEW',
+        diffInfo,
+        '题目:',
+        problem || '',
+        '',
+        '题解:',
+        markdown || '',
+        '',
+        '标程:',
+        cpp || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.05,
+    timeoutMs: 90000,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', 'full ac review', info);
+    }
+  });
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] full ac review: ${review.slice(0, 1000)}\n`);
+  if (!/^\s*PASS\b/i.test(review)) {
+    const error = new Error(`full AC review failed: ${review.slice(0, 800)}`);
+    error.statusCode = 422;
+    throw error;
+  }
 }
 
 async function verifySampleWithStd(workspaceId, stdCpp) {
@@ -1527,19 +1698,19 @@ async function verifySampleWithStd(workspaceId, stdCpp) {
       const outTag = idx === 1 ? '<!--SAMPLE_OUTPUT-->' : `<!--SAMPLE_OUTPUT${idx}-->`;
       const outEndTag = idx === 1 ? '<!--SAMPLE_OUTPUT_END-->' : `<!--SAMPLE_OUTPUT${idx}_END-->`;
 
-      const inStart = result.indexOf(inTag);
+      const inStart = problemMd.indexOf(inTag);
       if (inStart === -1) break;
 
-      const inEnd = result.indexOf(inEndTag, inStart);
+      const inEnd = problemMd.indexOf(inEndTag, inStart);
       if (inEnd === -1) continue;
-      const inputMatch = result.slice(inStart, inEnd).match(/```(?:\w+)?\n([\s\S]*?)```/);
+      const inputMatch = problemMd.slice(inStart, inEnd).match(/```(?:\w+)?\n([\s\S]*?)```/);
       if (!inputMatch) continue;
 
-      const outStart = result.indexOf(outTag, inEnd);
+      const outStart = problemMd.indexOf(outTag, inEnd);
       if (outStart === -1) continue;
-      const outEnd = result.indexOf(outEndTag, outStart);
+      const outEnd = problemMd.indexOf(outEndTag, outStart);
       if (outEnd === -1) continue;
-      const outputMatch = result.slice(outStart, outEnd).match(/```(?:\w+)?\n[\s\S]*?```/);
+      const outputMatch = problemMd.slice(outStart, outEnd).match(/```(?:\w+)?\n[\s\S]*?```/);
       if (!outputMatch) continue;
 
       const sampleInput = inputMatch[1];
@@ -1549,7 +1720,7 @@ async function verifySampleWithStd(workspaceId, stdCpp) {
       const newOutputBlock = oldOutputBlock.replace(/```(?:\w+)?\n[\s\S]*?\n```/, '```\n' + actualOutput.trimEnd() + '\n```');
 
       result = result.slice(0, outStart) + outTag + '\n' + newOutputBlock + '\n' + outEndTag + result.slice(outEnd + outEndTag.length);
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample ${idx}: old='${oldOutputBlock.match(/```\n([\s\S]*?)```/)?.[1]?.trim()}' new='${actualOutput.trim()}'\n`);
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample ${idx}: old='${extractFenceContent(oldOutputBlock).trim()}' new='${actualOutput.trim()}'\n`);
     }
 
     result = result.replace(/<!--SAMPLE_INPUT\d*-->/g, '');
@@ -1563,10 +1734,27 @@ async function verifySampleWithStd(workspaceId, stdCpp) {
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] problem.md sample output updated\n`);
     }
   } catch (error) {
-    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample verification skipped: ${error.message}\n`);
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] sample generation failed: ${error.message}\n`);
+    const wrapped = new Error(`sample generation failed: ${error.message}`);
+    wrapped.statusCode = error.statusCode || 422;
+    throw wrapped;
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+function extractFenceContent(block) {
+  const match = String(block || '').match(/```(?:\w+)?\n([\s\S]*?)```/);
+  return match ? match[1] : '';
+}
+
+function normalizeJudgeOutput(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .trim()
+    .split('\n')
+    .map(line => line.trimEnd())
+    .join('\n');
 }
 
 function runStdWithInput(stdBin, input, timeoutMs) {

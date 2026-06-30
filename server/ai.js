@@ -1,5 +1,23 @@
 const hasRealLLM = Boolean(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL_NAME);
 
+const MOCK_CPP = `#include <bits/stdc++.h>
+using namespace std;
+int main() {
+  ios::sync_with_stdio(false);
+  cin.tie(nullptr);
+  long long n;
+  if (!(cin >> n)) return 0;
+  long long sum = 0;
+  for (long long i = 0; i < n; ++i) {
+    long long x;
+    cin >> x;
+    sum += x;
+  }
+  cout << sum << '\\n';
+  return 0;
+}
+`;
+
 export async function callLLM(messages, options = {}) {
   if (!hasRealLLM) {
     return mockLLM(messages, options);
@@ -101,7 +119,7 @@ function mockLLM(messages, options = {}) {
   }
 
   if (joined.includes('SOLUTION_DRAFT')) {
-    return `# 题解\n\n这是本地开发占位题解。\n\n## 思路\n先分析题意，再构造可行算法。\n\n## 正确性\n由于实现为占位内容，此处后续由真实 AI 补充。\n\n## 复杂度\n$O(n \\log n)$\n\n---\n\n\`\`\`cpp\n#include <bits/stdc++.h>\nusing namespace std;\nint main() { return 0; }\n\`\`\`\n`;
+    return `# 题解\n\n这是本地开发占位题解。\n\n## 思路\n读入整数个数 n，再顺序读入 n 个整数并累计总和。\n\n## 正确性\n算法对输入中的每个整数恰好加入答案一次，因此得到的结果等于全部整数之和，符合题意。\n\n## 复杂度\n时间复杂度 $O(n)$，空间复杂度 $O(1)$。\n\n---\n\n\`\`\`cpp\n${MOCK_CPP}\`\`\`\n`;
   }
 
   if (joined.includes('SOLUTION_CRITIC')) {
@@ -109,7 +127,38 @@ function mockLLM(messages, options = {}) {
   }
 
   if (joined.includes('SOLUTION_FINAL')) {
-    return `# 题解\n\n## 思路\n先分析题意，再构造可行算法。\n\n## 正确性\n通过逐步分析约束可得算法正确。\n\n## 复杂度\n$O(n \\log n)$\n\n\`\`\`cpp\n#include <bits/stdc++.h>\nusing namespace std;\nint main() { return 0; }\n\`\`\`\n`;
+    return `# 题解\n\n## 思路\n读入整数个数 n，再顺序读入 n 个整数并累计总和。\n\n## 正确性\n每个输入整数都会被访问一次并加入同一个累加变量，没有遗漏或重复。因此最终输出值正好是所有输入整数的和。\n\n## 复杂度\n时间复杂度 $O(n)$，空间复杂度 $O(1)$。\n\n\`\`\`cpp\n${MOCK_CPP}\`\`\`\n`;
+  }
+
+  if (joined.includes('SOLUTION_REPAIR')) {
+    return `# 题解\n\n## 思路\n读入整数个数 n，再顺序读入 n 个整数并累计总和。\n\n## 正确性\n每个输入整数都会被访问一次并加入同一个累加变量，没有遗漏或重复。因此最终输出值正好是所有输入整数的和。\n\n## 复杂度\n时间复杂度 $O(n)$，空间复杂度 $O(1)$。\n\n\`\`\`cpp\n${MOCK_CPP}\`\`\`\n`;
+  }
+
+  if (joined.includes('CODE_REVIEW')) {
+    return 'PASS\n- 本地 mock 跳过算法代码审查。';
+  }
+
+  if (joined.includes('FULL_AC_REVIEW')) {
+    return 'PASS\n- 本地 mock 跳过满分复杂度终审。';
+  }
+
+  if (joined.includes('CODE_FIX') || joined.includes('ALT_SOL') || joined.includes('DUAL_FIX') || joined.includes('BRUTE_ORACLE')) {
+    return `\`\`\`cpp\n${MOCK_CPP}\`\`\`\n`;
+  }
+
+  if (joined.includes('TEST_GEN') || joined.includes('BRUTE_TEST_GEN')) {
+    return `cases = [
+    "3\\n1 2 3",
+    "1\\n7",
+    "5\\n-1 0 1 2 3",
+    "4\\n10 20 30 40",
+    "2\\n-5 5",
+]
+for i in range(80):
+    if i:
+        print("===CASE===")
+    print(cases[i % len(cases)])
+`;
   }
 
   if (joined.includes('DATA_PLAN')) {
@@ -117,7 +166,18 @@ function mockLLM(messages, options = {}) {
   }
 
   if (joined.includes('GEN_PY')) {
-    return `import random\n\nrandom.seed(0)\nprint(1)\nprint(1)\n`;
+    return `import pathlib
+
+cases = [
+    "3\\n1 2 3\\n",
+    "1\\n7\\n",
+    "5\\n-1 0 1 2 3\\n",
+]
+
+for i, case in enumerate(cases, 1):
+    with open(f"{i}.in", "w", encoding="utf-8") as f:
+        f.write(case)
+`;
   }
 
   return options.fallback ?? 'mock response';
