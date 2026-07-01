@@ -201,5 +201,6 @@ function isRetryableLLMError(error) {
   const message = String(error?.message || '').toLowerCase();
   if (message.includes('fetch failed')) return true;
   if (message.includes('network') || message.includes('timeout') || message.includes('abort')) return true;
+  if (message.includes('missing content') || message.includes('empty')) return true;
   return false;
 }
