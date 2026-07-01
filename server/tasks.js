@@ -1315,6 +1315,9 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       stage: 'solution', state: 'running',
       message: `算法审查 ${round}/3`
     });
+    const prevReviewText = round > 1
+      ? reviews.map((r, i) => `第${i + 1}轮审查：${r.slice(0, 600)}`).join('\n\n')
+      : '';
     const reviewerPrompt = [
       {
         role: 'system',
@@ -1326,7 +1329,8 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           + '4. 边界情况：数组越界、整数溢出、空队列/空容器访问、特殊值（如 -1, INF）处理\n'
           + '5. 复杂度：最坏情况下时间复杂度是否在题目数据范围内可接受？注意 O(N) 的修改操作在 Q 次询问下是否退化到 O(NQ)\n'
           + '6. 输入输出：读入格式是否与题面一致？变量类型是否匹配？\n'
-          + '输出第一行只能是 PASS 或 FAIL，第二行开始列出具体问题（含代码行号和原因）。'
+          + '输出第一行只能是 PASS 或 FAIL，第二行开始列出具体问题（含代码行号和原因）。\n'
+          + '⚠️ 多轮审查须知：如果之前轮次已报告过的问题，本轮代码中已修复则不应再次报告；如果修复不完整或引入了新问题，指出遗留/新问题即可。'
       },
       {
         role: 'user',
@@ -1334,10 +1338,11 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           'CODE_REVIEW',
           '题目：',
           problem || '',
+          prevReviewText ? ['', '历史审查记录（之前轮次已报告过的错误，本轮不再重复）：', prevReviewText].join('\n') : '',
           '',
           '标程代码：',
           current || ''
-        ].join('\n')
+        ].filter(Boolean).join('\n')
       }
     ];
     const review = await callLLM(reviewerPrompt, {
@@ -1360,6 +1365,9 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       stage: 'solution', state: 'running',
       message: `正在按审查意见修复标程 ${round}/3`
     });
+    const fixHistoryText = round > 1
+      ? reviews.map((r, i) => `第${i + 1}轮审查意见：${r.slice(0, 400)}`).join('\n\n')
+      : '';
     const fixPrompt = [
       {
         role: 'system',
@@ -1368,7 +1376,8 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           + '- 如果审查指出的是变量名错误、边界加减1、类型不匹配等小问题 → 在原代码上修补\n'
           + '- 如果审查指出算法根本性错误（如忽略了核心约束、复杂度退化到不可接受、贪心策略缺乏正确性保证）→ **必须否定原算法框架，从零重新设计**，不做局部修补\n'
           + '只输出修正/重设计后的完整 C++ 代码（```cpp 代码块），不要解释。\n'
-          + '审查意见中提到的反例场景必须正确解决，不可敷衍。'
+          + '审查意见中提到的反例场景必须正确解决，不可敷衍。\n'
+          + '⚠️ 多轮修复须知：请结合本轮审查意见和历轮审查历史判断问题根因。如果同一问题在多轮中被反复指出，说明之前的修补方案无效，需要换一种根本性不同的解法。'
       },
       {
         role: 'user',
@@ -1376,13 +1385,14 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           'CODE_FIX',
           '题目：',
           problem || '',
+          fixHistoryText ? ['', '历轮审查历史（之前轮次指出的问题及修复方向）：', fixHistoryText].join('\n') : '',
           '',
           '当前标程：',
           current || '',
           '',
-          '审查意见：',
+          '本轮审查意见：',
           review || ''
-        ].join('\n')
+        ].filter(Boolean).join('\n')
       }
     ];
     const fixed = await callLLM(fixPrompt, {
