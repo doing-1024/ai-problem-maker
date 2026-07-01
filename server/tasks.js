@@ -589,7 +589,8 @@ async function generateSolutionCandidate(workspaceId, { problem, draft, critique
     '',
     '【第三步：输出】',
     '输出必须严格包含中文 Markdown 章节：# 题解、## 思路、## 正确性、## 复杂度。',
-    '最后必须包含一个 ```cpp 代码块，代码块内是完整 C++17 标程。',
+    '只输出一个 ```cpp 代码块且必须是最后一个代码块，代码块内是完整 C++17 标程。',
+    '标程必须是可独立编译的完整程序，必须包含 int main() 或 signed main() 入口。',
     '标程必须是满分 AC 解法；不要输出部分分、暴力、伪代码或未经证明的贪心。',
     '如果上一候选失败，必须换一种完整设计重新生成，不要只做局部补丁。',
     '',
@@ -598,7 +599,8 @@ async function generateSolutionCandidate(workspaceId, { problem, draft, critique
     '- 修改操作是否导致每次查询 O(N) 重建？是否能做到 O(log N) 更新？',
     '- 贪心策略是否有严格的反例证明？还是凭感觉猜测？',
     '- 递归深度是否可能导致栈溢出 (N=1e5 时递归深度 >1e4 需改迭代)？',
-    '- long long 是否足够？（值域乘积是否超过 2e9 * 2e9）'
+    '- long long 是否足够？（值域乘积是否超过 2e9 * 2e9）',
+    '- 代码的最后部分是否是 int main() / signed main()？确保 main 函数没有被截断'
   ];
   const user = [
     'SOLUTION_FINAL',
@@ -623,6 +625,7 @@ async function generateSolutionCandidate(workspaceId, { problem, draft, critique
     { role: 'user', content: user.filter(Boolean).join('\n') }
   ], {
     temperature: candidate === 1 ? 0.2 : 0.35,
+    maxTokens: 8192,
     retries: 5,
     onComplete: async info => {
       await logLLMComplete(workspaceId, 'solution.log', `final candidate ${candidate}`, info);
@@ -1013,13 +1016,15 @@ async function exists(workspaceId, rel) {
 }
 
 function extractCodeBlock(text, lang) {
-  const regex = new RegExp(`\`\`\`${lang}\\n([\\s\\S]*?)\`\`\``, 'i');
-  const match = text.match(regex);
-  return match ? match[1].trim() : '';
+  const regex = new RegExp(`\`\`\`${lang}\\n([\\s\\S]*?)\`\`\``, 'gi');
+  const matches = Array.from(text.matchAll(regex));
+  if (!matches.length) return '';
+  const last = matches[matches.length - 1];
+  return last[1].trim();
 }
 
 function stripCppBlock(text) {
-  return text.replace(/```cpp[\s\S]*?```/i, '').trim();
+  return text.replace(/```cpp[\s\S]*?```/gi, '').trim();
 }
 
 function extractPythonCode(text) {
@@ -1266,7 +1271,8 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
         [
           {
             role: 'system',
-            content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。只输出修正后的完整 C++ 代码，不要 Markdown 包裹，不要解释。',
+            content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。只输出修正后的完整 C++ 代码，不要 Markdown 包裹，不要解释。\n'
+              + '⚠️ 如果链接错误提示 undefined reference to `main`，必须在代码末尾补上完整的 int main() 或 signed main() 函数。',
           },
           {
             role: 'user',
