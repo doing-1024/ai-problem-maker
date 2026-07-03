@@ -65,12 +65,12 @@ function baseMeta(id) {
       solution: {
         fingerprint: '',
         updatedAt: '',
-        resultPaths: ['solution/solution.md', 'solution/std.cpp']
+        resultPaths: ['solution/algorithm.md', 'solution/std.cpp', 'solution/solution.md', 'solution/verification.md']
       },
       data: {
         fingerprint: '',
         updatedAt: '',
-        resultPaths: ['data/hack_plan.md', 'data/gen.py']
+        resultPaths: ['data/hack_plan.md', 'data/gen.py', 'data/validator.py', 'data/problem_type.json', 'data/checker.cpp', 'data/coverage.json', 'data/stress_report.md']
       },
       run: { fingerprint: '', updatedAt: '', resultPath: 'data/datas.zip' }
     },
@@ -259,12 +259,19 @@ export async function downloadWorkspaceZip(id) {
     '### 题解与标程',
     '',
     '- `solution/solution.md` — **题解**，包含解题思路、正确性证明和复杂度分析。',
+    '- `solution/algorithm.md` — **算法草案**，记录进入标程生成前的约束分析和算法设计。',
     '- `solution/std.cpp` — **C++ 标准程序**（标程），用于对拍或评测。',
+    '- `solution/verification.md` — **标程验证报告**，记录候选程序、对拍和反例搜索等校验结果。',
     '',
     '### 数据相关',
     '',
     '- `data/hack_plan.md` — **数据构造方案**，说明各测试点的规模、边界条件和构造目的。',
     '- `data/gen.py` — **数据生成器**，Python 脚本，可根据题面随机生成测试数据。',
+    '- `data/validator.py` — **输入校验器**，用于验证每个 `.in` 文件是否符合题面格式与约束。',
+    '- `data/problem_type.json` — **题型判定**，标记是否为多解/构造/浮点等需要 checker 的题型。',
+    '- `data/checker.cpp` — **Special Judge**，仅在多解/构造等题型需要时生成。',
+    '- `data/coverage.json` — **数据覆盖率报告**，记录数据文件数量、规模摘要和校验结果。',
+    '- `data/stress_report.md` — **压力测试报告**，记录最大数据运行耗时等信息。',
     '- `data/datas.zip` — **测试数据压缩包**，包含所有测试点的输入（`.in`）和输出（`.out`）文件，可直接用于评测。',
     '',
     '### 其他',
@@ -332,9 +339,16 @@ function allowedUserWritePath(rel) {
     'input/problem_raw.md',
     'problem/problem.md',
     'solution/solution.md',
+    'solution/algorithm.md',
     'solution/std.cpp',
+    'solution/verification.md',
     'data/hack_plan.md',
     'data/gen.py',
+    'data/validator.py',
+    'data/problem_type.json',
+    'data/checker.cpp',
+    'data/coverage.json',
+    'data/stress_report.md',
     'data/datas.zip'
   ]).has(rel);
 }
@@ -344,9 +358,16 @@ export function isAllowedReadablePath(rel) {
     'input/problem_raw.md',
     'problem/problem.md',
     'solution/solution.md',
+    'solution/algorithm.md',
     'solution/std.cpp',
+    'solution/verification.md',
     'data/hack_plan.md',
     'data/gen.py',
+    'data/validator.py',
+    'data/problem_type.json',
+    'data/checker.cpp',
+    'data/coverage.json',
+    'data/stress_report.md',
     'data/datas.zip',
     'logs/problem.log',
     'logs/solution.log',

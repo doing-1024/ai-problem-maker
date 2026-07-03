@@ -104,6 +104,9 @@
               <button class="button small" @click="step.action" :disabled="step.disabled">{{ step.actionLabel }}</button>
             </div>
           </div>
+          <button class="button small block" @click="regenerateStd" :disabled="!files.includes('solution/algorithm.md')">
+            重生成标程
+          </button>
         </section>
 
         <section class="ops-section">
@@ -263,10 +266,16 @@ const pipeline = computed(() => [
 const pipelineDone = computed(() => pipeline.value.filter(step => step.state === 'done').length);
 const qualityItems = computed(() => [
   { label: '题面已生成', pass: files.value.includes('problem/problem.md') },
+  { label: '算法草案已生成', pass: files.value.includes('solution/algorithm.md') },
   { label: '题解已生成', pass: files.value.includes('solution/solution.md') },
   { label: '标程已生成并通过编译流程', pass: files.value.includes('solution/std.cpp') && status.value.solution?.state === 'done' },
+  { label: '标程验证报告已生成', pass: files.value.includes('solution/verification.md') },
   { label: '数据方案已生成', pass: files.value.includes('data/hack_plan.md') },
   { label: '数据生成器已生成', pass: files.value.includes('data/gen.py') },
+  { label: '输入校验器已生成', pass: files.value.includes('data/validator.py') },
+  { label: '题型判定已生成', pass: files.value.includes('data/problem_type.json') },
+  { label: '覆盖率报告已生成', pass: files.value.includes('data/coverage.json') },
+  { label: '压力测试报告已生成', pass: files.value.includes('data/stress_report.md') },
   { label: '数据包已生成并通过 zip 校验', pass: files.value.includes('data/datas.zip') && status.value.data?.state === 'done' }
 ]);
 const qualityScore = computed(() => qualityItems.value.filter(item => item.pass).length);
@@ -444,6 +453,21 @@ async function generateSolution() {
   }
 }
 
+async function regenerateStd() {
+  clearMessages();
+  try {
+    selectedFile.value = 'solution/std.cpp';
+    livePreview.value = true;
+    const result = await api(`/api/workspaces/${workspaceId.value}/solution/std`, { method: 'POST' });
+    setEditorResult('solution/std.cpp', result.cpp);
+    successMessage.value = '标程已重生成并通过验证';
+    await refreshAll();
+  } catch (error) {
+    livePreview.value = false;
+    errorMessage.value = error.message;
+  }
+}
+
 async function generateDataPlan() {
   clearMessages();
   try {
@@ -584,10 +608,15 @@ function fileIcon(file) {
 }
 
 function fileForEvent(data) {
-  if (data.stage === 'solution') return 'solution/solution.md';
+  if (data.stage === 'solution') {
+    if (data.phase === 'algorithm') return 'solution/algorithm.md';
+    if (data.phase === 'std') return 'solution/std.cpp';
+    return 'solution/solution.md';
+  }
   if (data.stage === 'data') {
     if (data.phase === 'gen') return 'data/gen.py';
     if (data.phase === 'run') return 'data/datas.zip';
+    if (data.phase === 'validator') return 'data/validator.py';
     return 'data/hack_plan.md';
   }
   return 'problem/problem.md';

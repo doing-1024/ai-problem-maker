@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ensureAppDirs, listWorkspaces, createWorkspace, getWorkspaceMeta, getWorkspaceMetaInternal, readWorkspaceFile, writeWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip, readDatasPreview, isAllowedReadablePath } from './workspace.js';
-import { generateProblem, generateSolution, generateDataPlan, runDataGenerator } from './tasks.js';
+import { generateProblem, generateSolution, regenerateStdSolution, generateDataPlan, runDataGenerator } from './tasks.js';
 import { subscribeWorkspace } from './events.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -136,6 +136,16 @@ app.post('/api/workspaces/:id/solution', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
     const result = await generateSolution(req.params.id, req.body || {});
+    res.json(result);
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+  }
+});
+
+app.post('/api/workspaces/:id/solution/std', async (req, res) => {
+  try {
+    await requireWorkspaceAccess(req, req.params.id);
+    const result = await regenerateStdSolution(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
     res.status(error.statusCode || 400).json({ error: error.message });
