@@ -664,7 +664,7 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
   const system = [
     '你是 OI C++ 标程工程师。只写可独立编译的满分 C++17 标程。标记为 STD_CPP_CANDIDATE。',
     `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-    '只输出一个 ```cpp 代码块，不要输出题解、解释或 Markdown 正文。',
+    '只输出纯 C++17 源码，不要使用 Markdown 代码块，不要输出题解、解释或任何正文。',
     '标程必须是可独立编译的完整程序，必须包含 int main() 或 signed main() 入口。',
     '标程必须是满分 AC 解法；不要输出部分分、暴力、伪代码或未经证明的贪心。',
     '读入格式必须严格匹配题面。不得忽略任何输入参数、约束或特殊情况。',
@@ -717,7 +717,7 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
 }
 
 async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate) {
-  let cpp = extractCodeBlock(rawCpp, 'cpp') || String(rawCpp || '').trim();
+  let cpp = sanitizeCppCode(rawCpp);
   assertCppLooksReasonable(cpp);
   const gates = [];
   cpp = await repairCppCompilation(workspaceId, cpp, problem);
@@ -1137,7 +1137,8 @@ export async function runDataGenerator(workspaceId) {
 export const __testHooks = {
   verifySampleWithStd,
   verifyWithBruteOracle,
-  verifyFullScoreReview
+  verifyFullScoreReview,
+  sanitizeCppCode
 };
 
 async function executePythonGenerator(workspaceId, { genPy, stdCpp, validatorPy, problemType, checkerCpp }) {
@@ -1369,7 +1370,7 @@ async function exists(workspaceId, rel) {
 }
 
 function extractCodeBlock(text, lang) {
-  const regex = new RegExp(`\`\`\`${lang}\\n([\\s\\S]*?)\`\`\``, 'gi');
+  const regex = new RegExp('```\\s*' + lang + '[^\\n\\r]*[\\r\\n]+([\\s\\S]*?)```', 'gi');
   const matches = Array.from(text.matchAll(regex));
   if (!matches.length) return '';
   const last = matches[matches.length - 1];
@@ -1378,6 +1379,20 @@ function extractCodeBlock(text, lang) {
 
 function stripCppBlock(text) {
   return text.replace(/```cpp[\s\S]*?```/gi, '').trim();
+}
+
+function sanitizeCppCode(text) {
+  let code = extractCodeBlock(text, 'cpp') || extractCodeBlock(text, 'c\\+\\+') || String(text || '').trim();
+  if (!code.includes('\n') && code.includes('\\n')) {
+    code = code.replace(/\\n/g, '\n');
+  }
+  code = code.replace(/^\s*```(?:\s*(?:cpp|c\+\+))?[^\n\r]*[\r\n]+/i, '');
+  code = code.replace(/[\r\n]+\s*```\s*$/i, '');
+  const includeIdx = code.search(/#\s*include/);
+  if (includeIdx > 0) code = code.slice(includeIdx);
+  const trailingFence = code.indexOf('\n```');
+  if (trailingFence !== -1) code = code.slice(0, trailingFence);
+  return code.trim();
 }
 
 function extractPythonCode(text) {
@@ -1642,13 +1657,14 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
         [
           {
             role: 'system',
-            content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。只输出修正后的完整 C++ 代码，不要 Markdown 包裹，不要解释。\n'
+            content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。标记为 COMPILE_FIX。只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。\n'
               + '⚠️ 如果链接错误提示 undefined reference to `main`，必须在代码末尾补上完整的 int main() 或 signed main() 函数。',
           },
           {
             role: 'user',
             content: [
               '编译错误:',
+              'COMPILE_FIX',
               message,
               '',
               '题目描述:',
@@ -1672,7 +1688,7 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
           },
         }
       );
-      current = extractCodeBlock(fixed, 'cpp') || fixed.trim() || current;
+      current = sanitizeCppCode(fixed) || current;
     }
   }
   return current;
@@ -1746,7 +1762,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           + '判断审查类型：\n'
           + '- 如果审查指出的是变量名错误、边界加减1、类型不匹配等小问题 → 在原代码上修补\n'
           + '- 如果审查指出算法根本性错误（如忽略了核心约束、复杂度退化到不可接受、贪心策略缺乏正确性保证）→ **必须否定原算法框架，从零重新设计**，不做局部修补\n'
-          + '只输出修正/重设计后的完整 C++ 代码（```cpp 代码块），不要解释。\n'
+          + '只输出修正/重设计后的纯 C++17 源码，不要 Markdown 代码块，不要解释。\n'
           + '审查意见中提到的反例场景必须正确解决，不可敷衍。\n'
           + '⚠️ 多轮修复须知：请结合本轮审查意见和历轮审查历史判断问题根因。如果同一问题在多轮中被反复指出，说明之前的修补方案无效，需要换一种根本性不同的解法。'
       },
@@ -1767,19 +1783,19 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       }
     ];
     const fixed = await callLLM(fixPrompt, {
-      temperature: 0.1,
+      temperature: 0.25,
       maxTokens: 8192,
       retries: 3,
       onComplete: async info => {
         await logLLMComplete(workspaceId, 'solution.log', `code fix ${round}`, info);
       },
     });
-    current = extractCodeBlock(fixed, 'cpp') || fixed.trim() || current;
+    current = sanitizeCppCode(fixed) || current;
     try {
       await verifyCppCompiles(workspaceId, current);
     } catch (compileError) {
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, retrying: ${compileError.message.slice(0, 300)}\n`);
-      if (round === 3) throw compileError;
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, rejecting candidate: ${compileError.message.slice(0, 300)}\n`);
+      throw compileError;
     }
   }
   const error = new Error(`code review did not reach PASS after 3 rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
@@ -1840,7 +1856,7 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
         },
       });
 
-      let altCpp = extractCodeBlock(altSol, 'cpp') || altSol.trim();
+      let altCpp = sanitizeCppCode(altSol);
       if (!altCpp) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] alt gen failed\n`);
         continue;
@@ -1972,7 +1988,7 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
         },
       });
 
-      const newCode = extractCodeBlock(fixed, 'cpp') || fixed.trim();
+      const newCode = sanitizeCppCode(fixed);
       if (newCode && newCode.length > 20) {
         primaryStd = newCode;
         try {
@@ -2048,7 +2064,7 @@ async function verifyWithBruteOracle(workspaceId, stdCpp, problem) {
     }
   });
 
-  const oracleCpp = extractCodeBlock(oracleText, 'cpp') || oracleText.trim();
+  const oracleCpp = sanitizeCppCode(oracleText);
   const genPy = extractPythonCode(generatorText) || generatorText.trim();
   if (!oracleCpp || !genPy) {
     const error = new Error('brute oracle or test generator missing');
@@ -2163,7 +2179,7 @@ async function verifyWithCounterexampleSearch(workspaceId, stdCpp, problem) {
     }
   });
 
-  const oracleCpp = extractCodeBlock(oracleText, 'cpp') || oracleText.trim();
+  const oracleCpp = sanitizeCppCode(oracleText);
   const genPy = extractPythonCode(generatorText) || generatorText.trim();
   if (!oracleCpp || !genPy) {
     const error = new Error('counterexample oracle or generator missing');
@@ -2563,7 +2579,7 @@ async function generateCheckerCpp(workspaceId, { problemMd, solution, stdCpp, pr
       await logLLMComplete(workspaceId, 'data.log', 'checker cpp', info);
     }
   });
-  const code = extractCodeBlock(checker, 'cpp') || checker.trim();
+  const code = sanitizeCppCode(checker);
   assertCppLooksReasonable(code);
   return code;
 }
@@ -2648,6 +2664,11 @@ function ensureAlgorithmPlanLooksReasonable(plan) {
 
 function assertCppLooksReasonable(cpp) {
   const code = String(cpp || '');
+  if (code.includes('```')) {
+    const error = new Error('std.cpp candidate still contains Markdown fence');
+    error.statusCode = 422;
+    throw error;
+  }
   if (code.length < 40 || !/#include|import\s+</.test(code) || !/\b(main)\s*\(/.test(code)) {
     const error = new Error('std.cpp candidate looks invalid');
     error.statusCode = 422;

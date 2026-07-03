@@ -4,9 +4,23 @@ import path from 'path';
 import { app } from '../server/index.js';
 import { ensureAppDirs, createWorkspace, getWorkspaceMeta, writeWorkspaceFile, readWorkspaceFile, listWorkspaceFiles, downloadWorkspaceZip } from '../server/workspace.js';
 import { generateProblem, generateSolution, regenerateStdSolution, generateDataPlan, runDataGenerator } from '../server/tasks.js';
+import { __testHooks } from '../server/tasks.js';
 import { withWorkspaceLock } from '../server/job-lock.js';
 
 await ensureAppDirs();
+
+assert.equal(
+  __testHooks.sanitizeCppCode('```cpp\n#include <bits/stdc++.h>\nint main(){return 0;}\n```'),
+  '#include <bits/stdc++.h>\nint main(){return 0;}'
+);
+assert.equal(
+  __testHooks.sanitizeCppCode('```cpp \n#include <bits/stdc++.h>\nint main(){return 0;}\n```'),
+  '#include <bits/stdc++.h>\nint main(){return 0;}'
+);
+assert.equal(
+  __testHooks.sanitizeCppCode('说明\n```c++\n#include <bits/stdc++.h>\nint main(){return 0;}\n```'),
+  '#include <bits/stdc++.h>\nint main(){return 0;}'
+);
 
 const workspace = await createWorkspace();
 assert.ok(workspace.workspaceId);

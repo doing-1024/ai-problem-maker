@@ -189,7 +189,7 @@ ${MOCK_CPP}\`\`\`
     return 'PASS\n- 本地 mock 跳过满分复杂度终审。';
   }
 
-  if (joined.includes('CODE_FIX') || joined.includes('ALT_SOL') || joined.includes('DUAL_FIX') || joined.includes('BRUTE_ORACLE')) {
+  if (joined.includes('COMPILE_FIX') || joined.includes('CODE_FIX') || joined.includes('ALT_SOL') || joined.includes('DUAL_FIX') || joined.includes('BRUTE_ORACLE')) {
     return `\`\`\`cpp\n${MOCK_CPP}\`\`\`\n`;
   }
 
