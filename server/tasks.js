@@ -62,6 +62,7 @@ const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'st
 const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2));
 const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 2));
 const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 8 * 60 * 1000));
+const PROVIDER_METHOD_FALLBACK_COOLDOWN_MS = envInt('PROVIDER_METHOD_FALLBACK_COOLDOWN_MS', 60_000);
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);
@@ -71,6 +72,10 @@ function envInt(name, fallback) {
 function envChoice(name, fallback, choices) {
   const value = String(process.env[name] || '').trim().toLowerCase();
   return choices.includes(value) ? value : fallback;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function setState(workspaceId, stage, state, message) {
@@ -219,7 +224,14 @@ export async function generateProblem(workspaceId, payload) {
         });
       } catch (error) {
         if (!isProviderMethodError(error)) throw error;
-        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design primary prompt failed with provider method error, using compact prompt\n`);
+        await appendWorkspaceLog(
+          workspaceId,
+          'problem.log',
+          `[${stamp()}] joint design primary prompt failed with provider method error, cooldown ${PROVIDER_METHOD_FALLBACK_COOLDOWN_MS}ms before compact prompt\n`
+        );
+        await setState(workspaceId, 'problem', 'running', '供应商路由异常，等待后切换兼容模式');
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '供应商路由异常，等待后切换兼容模式' });
+        await sleep(PROVIDER_METHOD_FALLBACK_COOLDOWN_MS);
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在使用兼容模式联合设计' });
         designText = await callLLM(buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction }), {
           temperature: 0.25,
