@@ -422,7 +422,7 @@ async function generateProblem() {
   try {
     selectedFile.value = 'problem/problem.md';
     livePreview.value = true;
-    const result = await api(`/api/workspaces/${workspaceId.value}/problem`, {
+    const result = await api(`/api/workspaces/${workspaceId.value}/problem?async=1`, {
       method: 'POST',
       body: JSON.stringify({
         difficultyMode: difficultyMode.value,
@@ -430,8 +430,12 @@ async function generateProblem() {
         sourceText: problemRaw.value
       })
     });
-    setEditorResult(result.path || 'problem/problem.md', result.content);
-    if (result.cached) successMessage.value = '题目已命中缓存';
+    if (result.accepted) {
+      successMessage.value = '题目生成任务已启动';
+    } else {
+      setEditorResult(result.path || 'problem/problem.md', result.content);
+      if (result.cached) successMessage.value = '题目已命中缓存';
+    }
     await refreshAll();
   } catch (error) {
     livePreview.value = false;
@@ -444,9 +448,13 @@ async function generateSolution() {
   try {
     selectedFile.value = 'solution/solution.md';
     livePreview.value = true;
-    const result = await api(`/api/workspaces/${workspaceId.value}/solution`, { method: 'POST' });
-    setEditorResult('solution/solution.md', result.markdown);
-    if (result.cached) successMessage.value = '题解已命中缓存';
+    const result = await api(`/api/workspaces/${workspaceId.value}/solution?async=1`, { method: 'POST' });
+    if (result.accepted) {
+      successMessage.value = '题解与标程生成任务已启动';
+    } else {
+      setEditorResult('solution/solution.md', result.markdown);
+      if (result.cached) successMessage.value = '题解已命中缓存';
+    }
     await refreshAll();
   } catch (error) {
     livePreview.value = false;
@@ -459,9 +467,13 @@ async function regenerateStd() {
   try {
     selectedFile.value = 'solution/std.cpp';
     livePreview.value = true;
-    const result = await api(`/api/workspaces/${workspaceId.value}/solution/std`, { method: 'POST' });
-    setEditorResult('solution/std.cpp', result.cpp);
-    successMessage.value = '标程已重生成并通过验证';
+    const result = await api(`/api/workspaces/${workspaceId.value}/solution/std?async=1`, { method: 'POST' });
+    if (result.accepted) {
+      successMessage.value = '标程重生成任务已启动';
+    } else {
+      setEditorResult('solution/std.cpp', result.cpp);
+      successMessage.value = '标程已重生成并通过验证';
+    }
     await refreshAll();
   } catch (error) {
     livePreview.value = false;
@@ -474,9 +486,13 @@ async function generateDataPlan() {
   try {
     selectedFile.value = 'data/hack_plan.md';
     livePreview.value = true;
-    const result = await api(`/api/workspaces/${workspaceId.value}/data/plan`, { method: 'POST' });
-    setEditorResult('data/hack_plan.md', result.plan);
-    if (result.cached) successMessage.value = '数据方案已命中缓存';
+    const result = await api(`/api/workspaces/${workspaceId.value}/data/plan?async=1`, { method: 'POST' });
+    if (result.accepted) {
+      successMessage.value = '数据方案生成任务已启动';
+    } else {
+      setEditorResult('data/hack_plan.md', result.plan);
+      if (result.cached) successMessage.value = '数据方案已命中缓存';
+    }
     await refreshAll();
   } catch (error) {
     livePreview.value = false;
@@ -489,9 +505,13 @@ async function runData() {
   try {
     selectedFile.value = 'data/datas.zip';
     livePreview.value = true;
-    const result = await api(`/api/workspaces/${workspaceId.value}/data/run`, { method: 'POST' });
-    setEditorResult('data/datas.zip', JSON.stringify(result, null, 2));
-    if (result.cached) successMessage.value = '数据包已命中缓存';
+    const result = await api(`/api/workspaces/${workspaceId.value}/data/run?async=1`, { method: 'POST' });
+    if (result.accepted) {
+      successMessage.value = '数据包生成任务已启动';
+    } else {
+      setEditorResult('data/datas.zip', JSON.stringify(result, null, 2));
+      if (result.cached) successMessage.value = '数据包已命中缓存';
+    }
     await refreshAll();
   } catch (error) {
     livePreview.value = false;

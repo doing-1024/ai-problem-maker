@@ -125,6 +125,10 @@ app.get('/api/workspaces/:id/events', async (req, res) => {
 app.post('/api/workspaces/:id/problem', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
+    if (wantsAsync(req)) {
+      runBackgroundJob(`problem:${req.params.id}`, () => generateProblem(req.params.id, req.body || {}));
+      return res.status(202).json({ accepted: true, stage: 'problem' });
+    }
     const result = await generateProblem(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
@@ -135,6 +139,10 @@ app.post('/api/workspaces/:id/problem', async (req, res) => {
 app.post('/api/workspaces/:id/solution', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
+    if (wantsAsync(req)) {
+      runBackgroundJob(`solution:${req.params.id}`, () => generateSolution(req.params.id, req.body || {}));
+      return res.status(202).json({ accepted: true, stage: 'solution' });
+    }
     const result = await generateSolution(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
@@ -145,6 +153,10 @@ app.post('/api/workspaces/:id/solution', async (req, res) => {
 app.post('/api/workspaces/:id/solution/std', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
+    if (wantsAsync(req)) {
+      runBackgroundJob(`solution/std:${req.params.id}`, () => regenerateStdSolution(req.params.id, req.body || {}));
+      return res.status(202).json({ accepted: true, stage: 'solution' });
+    }
     const result = await regenerateStdSolution(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
@@ -155,6 +167,10 @@ app.post('/api/workspaces/:id/solution/std', async (req, res) => {
 app.post('/api/workspaces/:id/data/plan', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
+    if (wantsAsync(req)) {
+      runBackgroundJob(`data/plan:${req.params.id}`, () => generateDataPlan(req.params.id, req.body || {}));
+      return res.status(202).json({ accepted: true, stage: 'data' });
+    }
     const result = await generateDataPlan(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
@@ -165,6 +181,10 @@ app.post('/api/workspaces/:id/data/plan', async (req, res) => {
 app.post('/api/workspaces/:id/data/run', async (req, res) => {
   try {
     await requireWorkspaceAccess(req, req.params.id);
+    if (wantsAsync(req)) {
+      runBackgroundJob(`data/run:${req.params.id}`, () => runDataGenerator(req.params.id, req.body || {}));
+      return res.status(202).json({ accepted: true, stage: 'data' });
+    }
     const result = await runDataGenerator(req.params.id, req.body || {});
     res.json(result);
   } catch (error) {
@@ -212,4 +232,19 @@ async function requireWorkspaceAccess(req, id) {
     error.statusCode = 403;
     throw error;
   }
+}
+
+function wantsAsync(req) {
+  const prefer = String(req.headers.prefer || '').toLowerCase();
+  return req.query.async === '1' || prefer.includes('respond-async');
+}
+
+function runBackgroundJob(label, fn) {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(fn)
+      .catch(error => {
+        console.error(`[background ${label}] ${error?.stack || error?.message || error}`);
+      });
+  });
 }

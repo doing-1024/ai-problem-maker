@@ -77,7 +77,7 @@ try {
     });
   });
 
-  const problem = await runJob('generate problem', 'problem', `/api/workspaces/${workspace.workspaceId}/problem`, [
+  const problem = await runJob('generate problem', 'problem', `/api/workspaces/${workspace.workspaceId}/problem?async=1`, [
     'problem/problem.md'
   ], {
     method: 'POST',
@@ -92,7 +92,7 @@ try {
   assert.ok(problem.content?.includes('## 题意'));
   assert.ok(problem.content?.includes('## 输入格式'));
 
-  const solution = await runJob('generate solution/std.cpp', 'solution', `/api/workspaces/${workspace.workspaceId}/solution`, [
+  const solution = await runJob('generate solution/std.cpp', 'solution', `/api/workspaces/${workspace.workspaceId}/solution?async=1`, [
     'solution/algorithm.md',
     'solution/std.cpp',
     'solution/solution.md',
@@ -106,7 +106,7 @@ try {
   assert.ok(solution.cpp?.includes('main'));
   assert.ok(solution.verification?.includes('# 标程验证报告'));
 
-  const dataPlan = await runJob('generate data plan/validator', 'data', `/api/workspaces/${workspace.workspaceId}/data/plan`, [
+  const dataPlan = await runJob('generate data plan/validator', 'data', `/api/workspaces/${workspace.workspaceId}/data/plan?async=1`, [
     'data/hack_plan.md',
     'data/gen.py',
     'data/validator.py',
@@ -120,7 +120,7 @@ try {
   assert.ok(dataPlan.genPy?.includes('import'));
   assert.ok(dataPlan.validatorPy?.includes('sys.stdin'));
 
-  const run = await runJob('run data generator', 'data', `/api/workspaces/${workspace.workspaceId}/data/run`, [
+  const run = await runJob('run data generator', 'data', `/api/workspaces/${workspace.workspaceId}/data/run?async=1`, [
     'data/datas.zip',
     'data/coverage.json',
     'data/stress_report.md'
@@ -198,11 +198,11 @@ async function runJob(name, stage, path, requiredFiles, options) {
           directResult = await api(path, options);
         } catch (error) {
           if (!isLikelyLongRequestDisconnect(error)) throw error;
-          console.warn(`request disconnected for ${name}; polling workspace state`);
+          console.warn(`request interrupted for ${name}; polling workspace state`);
         }
 
         const pollResult = await waitForStage(stage, requiredFiles, timeoutMs);
-        if (directResult && requiredFiles.every(file => pollResult.files.includes(file))) {
+        if (directResult && !directResult.accepted && requiredFiles.every(file => pollResult.files.includes(file))) {
           return directResult;
         }
         return readJobResult(requiredFiles);
@@ -334,7 +334,12 @@ async function api(path, options = {}) {
 
 function isLikelyLongRequestDisconnect(error) {
   const message = String(error?.message || '').toLowerCase();
-  return message.includes('fetch failed') || message.includes('aborted') || message.includes('terminated') || message.includes('eof');
+  const raw = String(error?.body?.raw || '').toLowerCase();
+  return message.includes('fetch failed')
+    || message.includes('aborted')
+    || message.includes('terminated')
+    || message.includes('eof')
+    || (error?.statusCode >= 500 && (message.includes('<!doctype html') || raw.includes('<!doctype html') || raw.includes('hugging face')));
 }
 
 function rateLimitWaitMs(error) {
