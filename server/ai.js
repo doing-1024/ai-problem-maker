@@ -315,6 +315,21 @@ int main(int argc, char** argv) {
 `;
   }
 
+  if (joined.includes('GEN_PY_FIX')) {
+    return `import pathlib
+
+cases = [
+    "3\\n1 2 3\\n",
+    "1\\n7\\n",
+    "5\\n-1 0 1 2 3\\n",
+]
+
+for i, case in enumerate(cases, 1):
+    with open(f"{i}.in", "w", encoding="utf-8") as f:
+        f.write(case)
+`;
+  }
+
   if (joined.includes('GEN_PY')) {
     return `import pathlib
 

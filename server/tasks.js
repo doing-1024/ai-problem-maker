@@ -643,7 +643,7 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] aligned algorithm retry ${attempt + 1}/${retries}: ${error.message}\n`);
     }
   });
-  assertAlgorithmPlanLooksReasonable(algorithm);
+  ensureAlgorithmPlanLooksReasonable(algorithm);
 
   const cppText = await callLLM([
     {
@@ -1354,18 +1354,17 @@ export async function runDataGenerator(workspaceId) {
       error.statusCode = 400;
       throw error;
     }
-    const combinedInput = JSON.stringify({
+    const initialFingerprint = hashText(JSON.stringify({
       version: DATA_PIPELINE_VERSION,
       genPy,
       stdCpp,
       validatorPy,
       problemType,
       checkerCpp
-    });
-    const fingerprint = hashText(combinedInput);
+    }));
     const meta = await getWorkspaceMetaInternal(workspaceId);
     if (
-      meta?.jobs?.run?.fingerprint === fingerprint &&
+      meta?.jobs?.run?.fingerprint === initialFingerprint &&
       (await exists(workspaceId, 'data/datas.zip')) &&
       (await exists(workspaceId, 'data/coverage.json')) &&
       (await exists(workspaceId, 'data/stress_report.md'))
@@ -1382,12 +1381,13 @@ export async function runDataGenerator(workspaceId) {
     emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在运行数据生成器' });
 
     let currentStdCpp = stdCpp;
+    let currentGenPy = genPy;
     let lastError = null;
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const result = await executePythonGenerator(workspaceId, {
-          genPy,
+          genPy: currentGenPy,
           stdCpp: currentStdCpp,
           validatorPy,
           problemType,
@@ -1396,10 +1396,18 @@ export async function runDataGenerator(workspaceId) {
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
         assertDataZipLooksValid(result.zipContent);
         await verifyZipArchive(result.zipContent);
+        const finalFingerprint = hashText(JSON.stringify({
+          version: DATA_PIPELINE_VERSION,
+          genPy: currentGenPy,
+          stdCpp: currentStdCpp,
+          validatorPy,
+          problemType,
+          checkerCpp
+        }));
         await writeWorkspaceFile(workspaceId, 'data/datas.zip', result.zipContent);
         await writeWorkspaceFile(workspaceId, 'data/coverage.json', JSON.stringify(result.coverage, null, 2));
         await writeWorkspaceFile(workspaceId, 'data/stress_report.md', result.stressReport);
-        await saveJobResult(workspaceId, 'run', fingerprint, {
+        await saveJobResult(workspaceId, 'run', finalFingerprint, {
           resultPath: 'data/datas.zip',
           coveragePath: 'data/coverage.json',
           stressReportPath: 'data/stress_report.md',
@@ -1418,8 +1426,29 @@ export async function runDataGenerator(workspaceId) {
       } catch (error) {
         lastError = error;
         const errMsg = error.message || '';
-        const isRetryable = errMsg.includes('timed out') || errMsg.includes('std failed') || errMsg.includes('compile');
+        const isGeneratorError = errMsg.includes('validator failed') || errMsg.includes('gen.py failed') || errMsg.includes('no .in files generated');
+        const isStdError = errMsg.includes('timed out') || errMsg.includes('std failed') || errMsg.includes('compile');
+        const isRetryable = isGeneratorError || isStdError;
         if (!isRetryable || attempt === 3) break;
+
+        const problem = await safeRead(workspaceId, 'problem/problem.md');
+        if (isGeneratorError) {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'data', state: 'running',
+            message: `正在修复数据生成器 ${attempt}/3`
+          });
+          await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] fix gen.py attempt ${attempt}/3: ${errMsg.slice(0, 1000)}\n`);
+          currentGenPy = await repairDataGenerator(workspaceId, {
+            problem,
+            genPy: currentGenPy,
+            validatorPy,
+            stdCpp: currentStdCpp,
+            errorMessage: errMsg,
+            attempt
+          });
+          await writeWorkspaceFile(workspaceId, 'data/gen.py', currentGenPy);
+          continue;
+        }
 
         emitWorkspaceEvent(workspaceId, 'task:update', {
           stage: 'data', state: 'running',
@@ -1427,7 +1456,6 @@ export async function runDataGenerator(workspaceId) {
         });
         await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] fix std.cpp attempt ${attempt}/3: ${errMsg.slice(0, 1000)}\n`);
 
-        const problem = await safeRead(workspaceId, 'problem/problem.md');
         const fixed = await callLLM(
           [
             {
@@ -1468,6 +1496,59 @@ export async function runDataGenerator(workspaceId) {
 
     throw lastError || new Error('run failed');
   });
+}
+
+async function repairDataGenerator(workspaceId, { problem, genPy, validatorPy, stdCpp, errorMessage, attempt }) {
+  const fixed = await callLLM(
+    [
+      {
+        role: 'system',
+        content: [
+          '你是 Python 数据生成器修复助手。根据 validator/gen.py 的具体错误修正数据生成器。',
+          '只输出修正后的完整 Python 代码，不要 Markdown 包裹，不要解释。标记为 GEN_PY_FIX。',
+          '必须保证每个生成的 .in 都能通过给定 validator.py。',
+          '必须严格遵守题面数据范围；如果错误提到某变量越界，要显式 clamp 或重新设计随机范围。',
+          '不要修改输入格式，不要生成子目录，所有 .in 文件直接写入当前工作目录。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'GEN_PY_FIX',
+          `修复轮次: ${attempt}/3`,
+          '运行/校验错误:',
+          errorMessage || '',
+          '',
+          '题面:',
+          problem || '',
+          '',
+          'validator.py:',
+          validatorPy || '',
+          '',
+          '当前 gen.py:',
+          genPy || '',
+          '',
+          'std.cpp 读入格式参考:',
+          String(stdCpp || '').slice(0, 5000)
+        ].join('\n')
+      }
+    ],
+    {
+      temperature: 0.12,
+      timeoutMs: 90000,
+      maxTokens: 8192,
+      retries: 3,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'data.log', `gen fix ${attempt}`, info);
+      },
+      onRetry: async ({ attempt: ra, retries, error }) => {
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] gen fix LLM retry ${ra + 1}/${retries}: ${error.message}\n`);
+      }
+    }
+  );
+  const repaired = extractPythonCode(fixed) || fixed.trim();
+  ensurePythonGeneratorShape(repaired);
+  return repaired;
 }
 
 export const __testHooks = {
