@@ -143,16 +143,14 @@ export async function generateProblem(workspaceId, payload) {
             '- 对原题包含浮点/无解/最小费用等高风险细节时，改编题优先保持线性结构或小规模状态空间，避免同时引入树形遍历、任意顺序、复杂四舍五入和多种容量约束。',
             '',
             '你必须在同一次连续设计中同时给出题面、满分算法草案和 C++17 标程种子，三者必须完全一致。',
-            '输出格式必须使用以下 HTML 注释分段，不能省略任何分段：',
+            '第一轮输出题面和算法草案；随后会在同一对话上下文中继续要求你输出 std.cpp。',
+            '第一轮输出格式必须使用以下 HTML 注释分段，不能省略任何分段：',
             '<!--PROBLEM_MD-->',
             '完整 Markdown 题面',
             '<!--PROBLEM_MD_END-->',
             '<!--ALGORITHM_MD-->',
             '完整算法草案 Markdown',
             '<!--ALGORITHM_MD_END-->',
-            '<!--STD_CPP-->',
-            '完整 C++17 标程源码',
-            '<!--STD_CPP_END-->',
             '',
             '题面结构固定为：',
             '# 标题',
@@ -163,8 +161,7 @@ export async function generateProblem(workspaceId, payload) {
             '## 数据范围与提示',
             '不得省略任何一节。标记为 JOINT_PROBLEM_DESIGN。',
             '算法草案必须包含：# 算法草案、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。',
-            'std.cpp 必须是完整可编译程序，输入输出严格匹配题面，不要放在 Markdown 代码块里。',
-            '整体输出要紧凑：题面不超过 1800 字，算法草案不超过 1200 字，std.cpp 不超过 220 行，避免超长解释和模板。',
+            '整体输出要紧凑：题面不超过 1800 字，算法草案不超过 1200 字，避免超长解释。',
             '⚠️ 提示部分（数据范围与提示）只允许给出方向性提示（如"可以用某种优化结构的 DP"），不允许直接给出状态定义、转移方程、或具体算法名称（如"单调队列"）。',
             '⚠️ 样例部分必须用 HTML 注释标记样例输入和输出的代码块，格式如下：',
             '',
@@ -201,9 +198,10 @@ export async function generateProblem(workspaceId, payload) {
           ].join('\n')
         }
       ];
-      let designText = await callLLM(prompt, {
+      const designMessages = prompt;
+      let designText = await callLLM(designMessages, {
         temperature: 0.3,
-        maxTokens: 8192,
+        maxTokens: 4096,
         retries: 5,
         onComplete: async info => {
           await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
@@ -218,6 +216,35 @@ export async function generateProblem(workspaceId, payload) {
         }
       });
       let design = parseJointDesignBundle(designText);
+      const cppText = await callLLM([
+        ...designMessages,
+        { role: 'assistant', content: designText },
+        {
+          role: 'user',
+          content: [
+            'JOINT_STD_CPP',
+            '请基于上面你刚设计的题面和算法草案，继续输出完整 C++17 标程源码。',
+            '只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。',
+            '必须可独立编译，必须包含 main，输入输出严格匹配题面，代码尽量简洁，不超过 220 行。'
+          ].join('\n')
+        }
+      ], {
+        temperature: 0.15,
+        maxTokens: 8192,
+        retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', 'joint std seed', info);
+        },
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `联合标程种子重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint std retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      });
+      design.cpp = design.cpp || sanitizeCppCode(cppText);
       let content = design.problem;
       emitProblemPreview(workspaceId, content);
       if (!looksLikeProblemMarkdown(content)) {
