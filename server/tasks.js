@@ -164,6 +164,7 @@ export async function generateProblem(workspaceId, payload) {
             '不得省略任何一节。标记为 JOINT_PROBLEM_DESIGN。',
             '算法草案必须包含：# 算法草案、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。',
             'std.cpp 必须是完整可编译程序，输入输出严格匹配题面，不要放在 Markdown 代码块里。',
+            '整体输出要紧凑：题面不超过 1800 字，算法草案不超过 1200 字，std.cpp 不超过 220 行，避免超长解释和模板。',
             '⚠️ 提示部分（数据范围与提示）只允许给出方向性提示（如"可以用某种优化结构的 DP"），不允许直接给出状态定义、转移方程、或具体算法名称（如"单调队列"）。',
             '⚠️ 样例部分必须用 HTML 注释标记样例输入和输出的代码块，格式如下：',
             '',
@@ -202,7 +203,7 @@ export async function generateProblem(workspaceId, payload) {
       ];
       let designText = await callLLM(prompt, {
         temperature: 0.3,
-        maxTokens: 12000,
+        maxTokens: 8192,
         retries: 5,
         onComplete: async info => {
           await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
