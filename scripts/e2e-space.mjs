@@ -50,6 +50,7 @@ const args = parseArgs(process.argv.slice(2));
 const baseUrl = String(args.baseUrl || process.env.APM_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, '');
 const timeoutMs = Number(args.timeoutMs || process.env.APM_E2E_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
 const requestTimeoutMs = Number(args.requestTimeoutMs || process.env.APM_E2E_REQUEST_TIMEOUT_MS || 240000);
+const rateLimitRetries = Number(args.rateLimitRetries || process.env.APM_E2E_RATE_LIMIT_RETRIES || 2);
 const difficultyMode = String(args.difficultyMode || 'custom');
 const difficultyText = String(args.difficultyText || 'CSP-S T4');
 const sourceText = args.problemFile ? await fs.readFile(String(args.problemFile), 'utf8') : P1016;
@@ -181,19 +182,29 @@ async function step(name, fn) {
 
 async function runJob(name, stage, path, requiredFiles, options) {
   return step(name, async () => {
-    let directResult = null;
-    try {
-      directResult = await api(path, options);
-    } catch (error) {
-      if (!isLikelyLongRequestDisconnect(error)) throw error;
-      console.warn(`request disconnected for ${name}; polling workspace state`);
-    }
+    for (let attempt = 0; attempt <= rateLimitRetries; attempt += 1) {
+      try {
+        let directResult = null;
+        try {
+          directResult = await api(path, options);
+        } catch (error) {
+          if (!isLikelyLongRequestDisconnect(error)) throw error;
+          console.warn(`request disconnected for ${name}; polling workspace state`);
+        }
 
-    const pollResult = await waitForStage(stage, requiredFiles, timeoutMs);
-    if (directResult && requiredFiles.every(file => pollResult.files.includes(file))) {
-      return directResult;
+        const pollResult = await waitForStage(stage, requiredFiles, timeoutMs);
+        if (directResult && requiredFiles.every(file => pollResult.files.includes(file))) {
+          return directResult;
+        }
+        return readJobResult(requiredFiles);
+      } catch (error) {
+        const waitMs = rateLimitWaitMs(error);
+        if (!waitMs || attempt >= rateLimitRetries) throw error;
+        console.warn(`rate limited during ${name}; retry ${attempt + 1}/${rateLimitRetries} after ${Math.ceil(waitMs / 1000)}s`);
+        await sleep(waitMs);
+      }
     }
-    return readJobResult(requiredFiles);
+    throw new Error(`${name} retry loop exited unexpectedly`);
   });
 }
 
@@ -300,6 +311,14 @@ async function api(path, options = {}) {
 function isLikelyLongRequestDisconnect(error) {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('fetch failed') || message.includes('aborted') || message.includes('terminated') || message.includes('eof');
+}
+
+function rateLimitWaitMs(error) {
+  const message = String(error?.message || '');
+  if (!/限流|429|too many requests/i.test(message)) return 0;
+  const match = message.match(/预计\s*(\d+)\s*秒后可重试/);
+  const seconds = match ? Number(match[1]) : 300;
+  return Math.max(30_000, (Number.isFinite(seconds) ? seconds : 300) * 1000 + 5000);
 }
 
 function sleep(ms) {
