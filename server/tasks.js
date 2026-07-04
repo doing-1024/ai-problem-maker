@@ -279,7 +279,14 @@ export async function generateProblem(workspaceId, payload) {
         });
       }
       let design = parseJointDesignBundle(designText);
-      assertAlgorithmReliabilityContract(design.problem, design.algorithm);
+      design.algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+        problem: design.problem,
+        algorithm: design.algorithm,
+        difficultyInstruction,
+        difficultyMode,
+        logName: 'problem.log',
+        label: 'initial joint algorithm'
+      });
       const originalDesignProblem = design.problem;
       let cppText = '';
       try {
@@ -363,7 +370,14 @@ export async function generateProblem(workspaceId, payload) {
       content = await reviewAndReviseProblem(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
       if (design.algorithm) {
-        assertAlgorithmReliabilityContract(content, design.algorithm);
+        design.algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+          problem: content,
+          algorithm: design.algorithm,
+          difficultyInstruction,
+          difficultyMode,
+          logName: 'problem.log',
+          label: 'reviewed problem algorithm'
+        });
       }
       if (jointArtifactsNeedRealignment(originalDesignProblem, content, design)) {
         await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] final problem changed after review; regenerating aligned algorithm/std seed\n`);
@@ -386,7 +400,14 @@ export async function generateProblem(workspaceId, payload) {
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       if (design.algorithm) {
         design.algorithm = sanitizeMarkdownArtifact(design.algorithm);
-        assertAlgorithmReliabilityContract(content, design.algorithm);
+        design.algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+          problem: content,
+          algorithm: design.algorithm,
+          difficultyInstruction,
+          difficultyMode,
+          logName: 'problem.log',
+          label: 'final algorithm'
+        });
         await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm.slice(0, 320) });
       }
@@ -625,6 +646,75 @@ function normalizeForComparison(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+async function ensureAlgorithmReliabilityContractWithRepair(workspaceId, { problem, algorithm, difficultyInstruction = '', difficultyMode = '', logName = 'problem.log', label = 'algorithm' }) {
+  algorithm = sanitizeMarkdownArtifact(algorithm || '');
+  try {
+    assertAlgorithmReliabilityContract(problem, algorithm);
+    return algorithm;
+  } catch (initialError) {
+    await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} reliability contract repair needed: ${initialError.message}\n`);
+  }
+
+  for (let round = 1; round <= 2; round += 1) {
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'problem',
+      state: 'running',
+      message: `正在补强算法契约 ${round}/2`
+    });
+    const assessment = assessAlgorithmReliability(problem, algorithm);
+    const repaired = await callLLM([
+      {
+        role: 'system',
+        content: [
+          '你是 OI 联合设计 agent 的算法契约修复器。只修复算法草案，不改题面。',
+          '目标不是限制题型，而是让复杂题的满分算法足够具体、可审查、可实现。',
+          '必须保留题面要求和目标难度；如果题面是树/图/动态查询/容量/能量/数据结构复合题，可以继续保留，但必须把算法契约讲清楚。',
+          '输出 Markdown，必须包含：# 算法草案、## 题目重述、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。',
+          '## 算法选择 必须明确状态含义、转移或合并规则；若用树链剖分/DFN/线段树/倍增维护路径或区间状态，必须说明片段保存信息和合并规则。',
+          '## 正确性要点 必须说明不变量、单调性来源或合并可结合/可组合的原因；不能只写“显然正确”。',
+          '## 高风险反例 必须列出会打破错误贪心、错误 DFN 顺序假设、边界容量/无解等场景。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'ALGORITHM_CONTRACT_REPAIR',
+          `难度模式: ${difficultyMode}`,
+          `难度要求: ${difficultyInstruction}`,
+          `可靠性评估: ${JSON.stringify(assessment)}`,
+          '',
+          '最终题面:',
+          problem || '',
+          '',
+          '当前算法草案:',
+          algorithm || ''
+        ].join('\n')
+      }
+    ], {
+      temperature: 0.12,
+      timeoutMs: 90000,
+      maxTokens: 4096,
+      retries: 3,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, logName, `${label} contract repair ${round}`, info);
+      },
+      onRetry: async ({ attempt, retries, error }) => {
+        await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} contract repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
+      }
+    });
+    algorithm = sanitizeMarkdownArtifact(repaired);
+    ensureAlgorithmPlanLooksReasonable(algorithm);
+    try {
+      assertAlgorithmReliabilityContract(problem, algorithm);
+      return algorithm;
+    } catch (error) {
+      await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} contract repair ${round} still incomplete: ${error.message}\n`);
+      if (round === 2) throw error;
+    }
+  }
+  return algorithm;
+}
+
 async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyInstruction, difficultyMode }) {
   const algorithm = await callLLM([
     {
@@ -661,7 +751,14 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
     }
   });
   ensureAlgorithmPlanLooksReasonable(algorithm);
-  assertAlgorithmReliabilityContract(problem, algorithm);
+  const reliableAlgorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+    problem,
+    algorithm,
+    difficultyInstruction,
+    difficultyMode,
+    logName: 'problem.log',
+    label: 'aligned algorithm'
+  });
 
   const cppText = await callLLM([
     {
@@ -680,7 +777,7 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
         problem || '',
         '',
         '算法草案:',
-        algorithm || ''
+        reliableAlgorithm || ''
       ].join('\n')
     }
   ], {
@@ -696,7 +793,7 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
   });
   const cpp = sanitizeCppCode(cppText);
   assertCppLooksReasonable(cpp);
-  return { algorithm, cpp };
+  return { algorithm: reliableAlgorithm, cpp };
 }
 
 function isProviderMethodError(error) {
@@ -801,7 +898,14 @@ export async function generateSolution(workspaceId) {
       }
       const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
       algorithm = sanitizeMarkdownArtifact(algorithm);
-      assertAlgorithmReliabilityContract(problem, algorithm);
+      algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+        problem,
+        algorithm,
+        difficultyInstruction: diffCtx.instruction || '',
+        difficultyMode: diffCtx.mode || '',
+        logName: 'solution.log',
+        label: 'solution algorithm'
+      });
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
       const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
@@ -821,14 +925,21 @@ export async function regenerateStdSolution(workspaceId) {
     try {
       const problem = await safeRead(workspaceId, 'problem/problem.md');
       assertValidText(problem, '题目未生成，无法重生成标程');
-      const existingAlgorithm = await safeRead(workspaceId, 'solution/algorithm.md');
+      let existingAlgorithm = await safeRead(workspaceId, 'solution/algorithm.md');
       assertValidText(existingAlgorithm, '算法草案未生成，无法只重生成标程');
-      assertAlgorithmReliabilityContract(problem, existingAlgorithm);
       const meta = await getWorkspaceMetaInternal(workspaceId);
       const diffCtx = meta?.difficulty || {};
       const diffInfo = diffCtx.instruction
         ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
         : '';
+      existingAlgorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+        problem,
+        algorithm: existingAlgorithm,
+        difficultyInstruction: diffCtx.instruction || '',
+        difficultyMode: diffCtx.mode || '',
+        logName: 'solution.log',
+        label: 'std-only algorithm'
+      });
       const fingerprint = hashText(JSON.stringify({
         version: SOLUTION_PIPELINE_VERSION,
         mode: 'std-only',
