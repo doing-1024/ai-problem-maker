@@ -63,6 +63,7 @@ const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2)
 const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 2));
 const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 8 * 60 * 1000));
 const PROVIDER_METHOD_FALLBACK_COOLDOWN_MS = envInt('PROVIDER_METHOD_FALLBACK_COOLDOWN_MS', 60_000);
+const JOINT_DESIGN_COMPACT_FIRST = envBool('JOINT_DESIGN_COMPACT_FIRST', true);
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);
@@ -72,6 +73,13 @@ function envInt(name, fallback) {
 function envChoice(name, fallback, choices) {
   const value = String(process.env[name] || '').trim().toLowerCase();
   return choices.includes(value) ? value : fallback;
+}
+
+function envBool(name, fallback) {
+  const value = String(process.env[name] || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  return fallback;
 }
 
 function sleep(ms) {
@@ -203,9 +211,15 @@ export async function generateProblem(workspaceId, payload) {
           ].join('\n')
         }
       ];
-      const designMessages = prompt;
+      let designMessages = JOINT_DESIGN_COMPACT_FIRST
+        ? buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction })
+        : prompt;
       let designText;
       try {
+        if (JOINT_DESIGN_COMPACT_FIRST) {
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] using compact joint design first\n`);
+          emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在使用紧凑联合设计' });
+        }
         designText = await callLLM(designMessages, {
           temperature: 0.3,
           maxTokens: 4096,
@@ -233,7 +247,8 @@ export async function generateProblem(workspaceId, payload) {
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '供应商路由异常，等待后切换兼容模式' });
         await sleep(PROVIDER_METHOD_FALLBACK_COOLDOWN_MS);
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在使用兼容模式联合设计' });
-        designText = await callLLM(buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction }), {
+        designMessages = buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction });
+        designText = await callLLM(designMessages, {
           temperature: 0.25,
           maxTokens: 4096,
           retries: 5,
