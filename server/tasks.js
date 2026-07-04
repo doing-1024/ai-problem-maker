@@ -971,11 +971,12 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
   const attempts = [];
   const startedAt = Date.now();
   const reliability = assessAlgorithmReliability(problem, algorithm);
-  const strictGatesEnabled = shouldRunStrictVerification(reliability);
+  const riskGatesEnabled = shouldRunRiskVerification(reliability);
+  const dualGateEnabled = shouldRunDualVerification();
   await appendWorkspaceLog(
     workspaceId,
     'solution.log',
-    `[${stamp()}] verification config level=${SOLUTION_VERIFICATION_LEVEL} effective_strict=${strictGatesEnabled} candidates=${SOLUTION_MAX_CANDIDATES} review_rounds=${SOLUTION_REVIEW_ROUNDS} budget_ms=${SOLUTION_TIME_BUDGET_MS} reliability=${JSON.stringify(reliability)}\n`
+    `[${stamp()}] verification config level=${SOLUTION_VERIFICATION_LEVEL} risk_gates=${riskGatesEnabled} dual_gate=${dualGateEnabled} candidates=${SOLUTION_MAX_CANDIDATES} review_rounds=${SOLUTION_REVIEW_ROUNDS} budget_ms=${SOLUTION_TIME_BUDGET_MS} reliability=${JSON.stringify(reliability)}\n`
   );
   for (let candidate = 1; candidate <= SOLUTION_MAX_CANDIDATES; candidate += 1) {
     try {
@@ -995,7 +996,8 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
       const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, {
         startedAt,
         reliability,
-        strictGatesEnabled
+        riskGatesEnabled,
+        dualGateEnabled
       });
       assertSolutionBudget(startedAt, `before solution markdown for candidate ${candidate}`);
       await setSolutionProgress(workspaceId, '正在根据标程生成最终题解');
@@ -1183,7 +1185,7 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
   return finalText;
 }
 
-async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt, reliability, strictGatesEnabled = false } = {}) {
+async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt, reliability, riskGatesEnabled = false, dualGateEnabled = false } = {}) {
   let cpp = sanitizeCppCode(rawCpp);
   assertCppLooksReasonable(cpp);
   const gates = [];
@@ -1195,11 +1197,15 @@ async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, 
   cpp = await crossReviewStdCpp(workspaceId, cpp, problem, reliability);
   gates.push('llm-code-review');
   if (startedAt) assertSolutionBudget(startedAt, `after review candidate ${candidate}`);
-  if (strictGatesEnabled) {
+  if (dualGateEnabled) {
     await setSolutionProgress(workspaceId, `正在双解法对拍候选 ${candidate}`);
     cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
     gates.push('dual-solution-differential');
     if (startedAt) assertSolutionBudget(startedAt, `after dual verification candidate ${candidate}`);
+  } else {
+    gates.push('skipped-dual-solution-differential');
+  }
+  if (riskGatesEnabled) {
     await setSolutionProgress(workspaceId, `正在暴力 oracle 对拍候选 ${candidate}`);
     cpp = await verifyWithBruteOracle(workspaceId, cpp, problem);
     gates.push(`brute-oracle-${BRUTE_ORACLE_MIN_CASES}+cases`);
@@ -1208,13 +1214,12 @@ async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, 
     await verifyWithCounterexampleSearch(workspaceId, cpp, problem);
     gates.push(`counterexample-search-${COUNTEREXAMPLE_MIN_CASES}+cases`);
   } else {
-    gates.push('skipped-dual-solution-differential');
     gates.push('skipped-brute-oracle');
     gates.push('skipped-counterexample-search');
     await appendWorkspaceLog(
       workspaceId,
       'solution.log',
-      `[${stamp()}] strict verification skipped at level=${SOLUTION_VERIFICATION_LEVEL}; set SOLUTION_VERIFICATION_LEVEL=strict to enable dual/brute/counterexample gates\n`
+      `[${stamp()}] risk verification skipped at level=${SOLUTION_VERIFICATION_LEVEL}; high-risk designs enable brute/counterexample gates automatically; set SOLUTION_VERIFICATION_LEVEL=strict to also enable dual gate\n`
     );
   }
   await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] std candidate ${candidate} passed gates: ${gates.join(', ')}\n`);
@@ -1429,7 +1434,7 @@ export async function generateDataPlan(workspaceId) {
         }
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
-      genPy = extractPythonCode(genPy) || genPy;
+      genPy = sanitizePythonCode(genPy);
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
       assertDataArtifactsRespectProblemGuarantees(problemMd, plan, genPy, '');
@@ -1704,7 +1709,7 @@ async function repairDataGenerator(workspaceId, { problem, genPy, validatorPy, s
       }
     }
   );
-  const repaired = extractPythonCode(fixed) || fixed.trim();
+  const repaired = sanitizePythonCode(fixed);
   ensurePythonGeneratorShape(repaired);
   return repaired;
 }
@@ -1714,6 +1719,7 @@ export const __testHooks = {
   verifyWithBruteOracle,
   verifyFullScoreReview,
   sanitizeCppCode,
+  sanitizePythonCode,
   reviewPassed,
   sanitizeMarkdownArtifact,
   detectProblemGuarantees,
@@ -2018,6 +2024,33 @@ function extractPythonCode(text) {
   const generic = extractCodeBlock(text, 'py');
   if (generic) return generic;
   return '';
+}
+
+function sanitizePythonCode(text) {
+  let code = extractPythonCode(text) || String(text || '').trim();
+  if (!code.includes('\n') && code.includes('\\n')) {
+    code = code.replace(/\\n/g, '\n');
+  }
+  code = code.replace(/^\s*```(?:\s*(?:python|py))?[^\n\r]*[\r\n]+/i, '');
+  code = code.replace(/[\r\n]+\s*```\s*$/i, '');
+  const markers = [
+    'TEST_GEN',
+    'BRUTE_TEST_GEN',
+    'COUNTEREXAMPLE_GEN',
+    'GEN_PY',
+    'GEN_PY_FIX',
+    'VALIDATOR_PY'
+  ];
+  for (const marker of markers) {
+    code = code.replace(new RegExp(`^\\s*(?:标记为[:：]?\\s*)?${marker}\\s*$`, 'gmi'), '');
+  }
+  const codeStart = code.search(/(?:^|\n)\s*(?:#!.*python|import\s+|from\s+\w+\s+import|def\s+|class\s+)/);
+  if (codeStart > 0) {
+    code = code.slice(code[codeStart] === '\n' ? codeStart + 1 : codeStart);
+  }
+  const trailingFence = code.indexOf('\n```');
+  if (trailingFence !== -1) code = code.slice(0, trailingFence);
+  return code.trim();
 }
 
 function extractJsonObject(text) {
@@ -2543,7 +2576,7 @@ async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
         },
       });
 
-      const genScript = extractPythonCode(testGen) || testGen.trim();
+      const genScript = sanitizePythonCode(testGen);
       if (!genScript) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] test gen failed\n`);
         return primaryStd;
@@ -2706,7 +2739,7 @@ async function verifyWithBruteOracle(workspaceId, stdCpp, problem) {
   });
 
   const oracleCpp = sanitizeCppCode(oracleText);
-  const genPy = extractPythonCode(generatorText) || generatorText.trim();
+  const genPy = sanitizePythonCode(generatorText);
   if (!oracleCpp || !genPy) {
     const error = new Error('brute oracle or test generator missing');
     error.statusCode = 422;
@@ -2821,7 +2854,7 @@ async function verifyWithCounterexampleSearch(workspaceId, stdCpp, problem) {
   });
 
   const oracleCpp = sanitizeCppCode(oracleText);
-  const genPy = extractPythonCode(generatorText) || generatorText.trim();
+  const genPy = sanitizePythonCode(generatorText);
   if (!oracleCpp || !genPy) {
     const error = new Error('counterexample oracle or generator missing');
     error.statusCode = 422;
@@ -3176,7 +3209,7 @@ async function generateInputValidator(workspaceId, { problemMd, plan, genPy, dif
       await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] validator retry ${attempt + 1}/${retries}: ${error.message}\n`);
     }
   });
-  const code = extractPythonCode(validator) || validator.trim();
+  const code = sanitizePythonCode(validator);
   ensureValidatorShape(code);
   return code;
 }
@@ -3374,8 +3407,12 @@ function assertAlgorithmReliabilityContract(problem, algorithm = '') {
   throw error;
 }
 
-function shouldRunStrictVerification(reliability) {
+function shouldRunRiskVerification(reliability) {
   return SOLUTION_VERIFICATION_LEVEL === 'strict' || reliability?.level === 'high';
+}
+
+function shouldRunDualVerification() {
+  return SOLUTION_VERIFICATION_LEVEL === 'strict';
 }
 
 function hasAny(text, patterns) {

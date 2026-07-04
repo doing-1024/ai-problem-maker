@@ -22,6 +22,14 @@ assert.equal(
   '#include <bits/stdc++.h>\nint main(){return 0;}'
 );
 assert.equal(
+  __testHooks.sanitizePythonCode('TEST_GEN\nimport random\nprint(1)\n'),
+  'import random\nprint(1)'
+);
+assert.equal(
+  __testHooks.sanitizePythonCode('说明\n```python\nBRUTE_TEST_GEN\nimport sys\nprint(2)\n```'),
+  'import sys\nprint(2)'
+);
+assert.equal(
   __testHooks.sanitizeCppCode('#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 1;}\n#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 0;}'),
   '#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 0;}'
 );
