@@ -166,6 +166,37 @@ function mockLLM(messages, options = {}) {
 `;
   }
 
+  if (joined.includes('FINAL_PROBLEM_ALGORITHM')) {
+    return `# 算法草案
+
+## 难度命中理由
+本地 mock 使用顺序扫描模型，重点验证流程对齐逻辑。
+
+## 约束提取
+- 输入第一行包含 n。
+- 第二行包含 n 个整数。
+
+## 算法选择
+顺序读入并累加所有整数。
+
+## 正确性要点
+每个整数被加入答案一次且仅一次。
+
+## 复杂度目标
+时间复杂度 O(n)，空间复杂度 O(1)。
+
+## 高风险反例
+- n=1。
+- 存在负数或零。
+`;
+  }
+
+  if (joined.includes('FINAL_PROBLEM_STD_CPP')) {
+    return `\`\`\`cpp
+${MOCK_CPP}\`\`\`
+`;
+  }
+
   if (joined.includes('STD_CPP_CANDIDATE')) {
     return `\`\`\`cpp
 ${MOCK_CPP}\`\`\`

@@ -60,8 +60,8 @@ const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
 const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'standard', ['fast', 'standard', 'strict']);
 const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2));
-const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 2));
-const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 8 * 60 * 1000));
+const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 3));
+const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 10 * 60 * 1000));
 const PROVIDER_METHOD_FALLBACK_COOLDOWN_MS = envInt('PROVIDER_METHOD_FALLBACK_COOLDOWN_MS', 60_000);
 const JOINT_DESIGN_COMPACT_FIRST = envBool('JOINT_DESIGN_COMPACT_FIRST', true);
 
@@ -272,6 +272,7 @@ export async function generateProblem(workspaceId, payload) {
         });
       }
       let design = parseJointDesignBundle(designText);
+      const originalDesignProblem = design.problem;
       let cppText = '';
       try {
         cppText = await callLLM([
@@ -353,6 +354,23 @@ export async function generateProblem(workspaceId, payload) {
       content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction, difficultyMode);
       content = await reviewAndReviseProblem(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
+      if (jointArtifactsNeedRealignment(originalDesignProblem, content, design)) {
+        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] final problem changed after review; regenerating aligned algorithm/std seed\n`);
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在对齐最终题面、思路和标程种子' });
+        design.algorithm = '';
+        design.cpp = '';
+        try {
+          const aligned = await generateAlignedJointArtifacts(workspaceId, {
+            problem: content,
+            difficultyInstruction,
+            difficultyMode
+          });
+          design.algorithm = aligned.algorithm;
+          design.cpp = aligned.cpp;
+        } catch (error) {
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] aligned artifacts skipped: ${error.message}\n`);
+        }
+      }
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       if (design.algorithm) {
         await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
@@ -580,6 +598,87 @@ function parseJointDesignBundle(text) {
     algorithm,
     cpp
   };
+}
+
+function jointArtifactsNeedRealignment(originalProblem, finalProblem, design) {
+  if (!String(design?.algorithm || '').trim()) return true;
+  const before = normalizeForComparison(originalProblem);
+  const after = normalizeForComparison(finalProblem);
+  return before && after && before !== after;
+}
+
+function normalizeForComparison(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyInstruction, difficultyMode }) {
+  const algorithm = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 联合设计 agent 的收尾助手。现在题面已经经过审校修订，你必须只基于最终题面重新写算法草案。',
+        '算法草案要服务于后续 std.cpp 生成，必须具体、可实现、和题面完全一致。',
+        '不要引用旧题面、旧样例或旧变量名。标记为 FINAL_PROBLEM_ALGORITHM。',
+        '输出 Markdown，必须包含：# 算法草案、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'FINAL_PROBLEM_ALGORITHM',
+        `难度模式: ${difficultyMode}`,
+        `难度要求: ${difficultyInstruction}`,
+        '最终题面:',
+        problem || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.15,
+    maxTokens: 4096,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', 'aligned algorithm', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] aligned algorithm retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  assertAlgorithmPlanLooksReasonable(algorithm);
+
+  const cppText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI C++ 标程工程师。只基于最终题面和刚生成的算法草案写满分 C++17 标程。',
+        '题面、算法草案、代码必须完全一致。不要沿用任何旧题面的变量或逻辑。',
+        '只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。标记为 FINAL_PROBLEM_STD_CPP。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'FINAL_PROBLEM_STD_CPP',
+        '最终题面:',
+        problem || '',
+        '',
+        '算法草案:',
+        algorithm || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.12,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', 'aligned std seed', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] aligned std retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  const cpp = sanitizeCppCode(cppText);
+  assertCppLooksReasonable(cpp);
+  return { algorithm, cpp };
 }
 
 function isProviderMethodError(error) {
