@@ -1,6 +1,7 @@
 const hasRealLLM = Boolean(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL_NAME);
 const RATE_LIMIT_RETRY_BASE_MS = envInt('LLM_RATE_LIMIT_RETRY_BASE_MS', 60_000);
 const RATE_LIMIT_RETRY_MAX_MS = envInt('LLM_RATE_LIMIT_RETRY_MAX_MS', 180_000);
+const RATE_LIMIT_MAX_ATTEMPTS = Math.max(1, envInt('LLM_RATE_LIMIT_MAX_ATTEMPTS', 3));
 
 const MOCK_CPP = `#include <bits/stdc++.h>
 using namespace std;
@@ -80,7 +81,8 @@ export async function callLLM(messages, options = {}) {
       }
     } catch (error) {
       lastError = error;
-      if (attempt < retries && isRetryableLLMError(error)) {
+      const maxAttempts = isRateLimitError(error) ? Math.min(retries, RATE_LIMIT_MAX_ATTEMPTS) : retries;
+      if (attempt < maxAttempts && isRetryableLLMError(error)) {
         if (typeof options.onRetry === 'function') {
           const waitMs = retryWaitMs(error, attempt);
           await options.onRetry({
@@ -95,6 +97,12 @@ export async function callLLM(messages, options = {}) {
       }
       break;
     }
+  }
+  if (isRateLimitError(lastError)) {
+    const error = new Error('AI 供应商当前限流，请稍后重试。系统已减少无效重试以避免长时间卡住。');
+    error.statusCode = 503;
+    error.cause = lastError;
+    throw error;
   }
   throw lastError || new Error('LLM failed');
 }
@@ -326,9 +334,14 @@ function isRetryableLLMError(error) {
   return false;
 }
 
-function retryWaitMs(error, attempt) {
+function isRateLimitError(error) {
+  const status = Number(error?.statusCode || error?.status || 0);
   const message = String(error?.message || '').toLowerCase();
-  if (message.includes('http error 429') || message.includes('too many requests')) {
+  return status === 429 || message.includes('http error 429') || message.includes('too many requests');
+}
+
+function retryWaitMs(error, attempt) {
+  if (isRateLimitError(error)) {
     return Math.max(
       Number(error?.retryAfterMs || 0),
       Math.min(RATE_LIMIT_RETRY_BASE_MS * attempt, RATE_LIMIT_RETRY_MAX_MS)
