@@ -78,14 +78,15 @@ export async function callLLM(messages, options = {}) {
       lastError = error;
       if (attempt < retries && isRetryableLLMError(error)) {
         if (typeof options.onRetry === 'function') {
+          const waitMs = retryWaitMs(error, attempt);
           await options.onRetry({
             attempt,
             retries,
             error,
-            waitMs: Math.min(1000 * attempt, 3000)
+            waitMs
           });
         }
-        await sleep(Math.min(1000 * attempt, 3000));
+        await sleep(retryWaitMs(error, attempt));
         continue;
       }
       break;
@@ -298,11 +299,20 @@ function sleep(ms) {
 
 function isRetryableLLMError(error) {
   const status = Number(error?.statusCode || error?.status || 0);
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('http error 405') || message.includes('method not allowed')) return false;
   if (status >= 500 || status === 429) return true;
   if (error?.retryable) return true;
-  const message = String(error?.message || '').toLowerCase();
   if (message.includes('fetch failed')) return true;
   if (message.includes('network') || message.includes('timeout') || message.includes('abort')) return true;
   if (message.includes('missing content') || message.includes('empty')) return true;
   return false;
+}
+
+function retryWaitMs(error, attempt) {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('http error 429') || message.includes('too many requests')) {
+    return Math.min(10_000 * attempt, 30_000);
+  }
+  return Math.min(1000 * attempt, 3000);
 }
