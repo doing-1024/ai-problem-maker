@@ -54,10 +54,24 @@ const FEW_SHOT_EXAMPLE = `
 ——从单一算法升级为分层图最短路（复合思维：最短路 + DP/拆点），思维链深度和复合程度都显著提升。
 `;
 
-const SOLUTION_PIPELINE_VERSION = 'std-first-v1';
+const SOLUTION_PIPELINE_VERSION = 'std-first-v2';
 const DATA_PIPELINE_VERSION = 'data-reliability-v1';
-const BRUTE_ORACLE_MIN_CASES = 200;
-const COUNTEREXAMPLE_MIN_CASES = 40;
+const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
+const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
+const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'standard', ['fast', 'standard', 'strict']);
+const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2));
+const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 2));
+const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 8 * 60 * 1000));
+
+function envInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function envChoice(name, fallback, choices) {
+  const value = String(process.env[name] || '').trim().toLowerCase();
+  return choices.includes(value) ? value : fallback;
+}
 
 async function setState(workspaceId, stage, state, message) {
   await updateWorkspaceMeta(workspaceId, {
@@ -70,6 +84,11 @@ async function setState(workspaceId, stage, state, message) {
       }
     }
   });
+}
+
+async function setSolutionProgress(workspaceId, message) {
+  await setState(workspaceId, 'solution', 'running', message);
+  emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'running', message });
 }
 
 async function saveJobResult(workspaceId, stage, fingerprint, extra = {}) {
@@ -473,8 +492,7 @@ export async function generateSolution(workspaceId) {
         ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
         : '';
 
-      await setState(workspaceId, 'solution', 'running', '正在生成算法草案');
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'running', message: '正在生成算法草案' });
+      await setSolutionProgress(workspaceId, '正在生成算法草案');
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start std-first solution pipeline ${SOLUTION_PIPELINE_VERSION}\n`);
 
       const algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
@@ -511,8 +529,7 @@ export async function regenerateStdSolution(workspaceId) {
         algorithm: existingAlgorithm
       }));
 
-      await setState(workspaceId, 'solution', 'running', '正在重生成并验证标程');
-      emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'running', message: '正在重生成并验证标程' });
+      await setSolutionProgress(workspaceId, '正在重生成并验证标程');
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start std-only regeneration ${SOLUTION_PIPELINE_VERSION}\n`);
       const result = await buildVerifiedSolutionArtifacts(workspaceId, {
         problem,
@@ -534,13 +551,16 @@ export async function regenerateStdSolution(workspaceId) {
 async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, modeLabel = 'full' }) {
   let lastFailure = '';
   const attempts = [];
-  for (let candidate = 1; candidate <= 3; candidate += 1) {
+  const startedAt = Date.now();
+  await appendWorkspaceLog(
+    workspaceId,
+    'solution.log',
+    `[${stamp()}] verification config level=${SOLUTION_VERIFICATION_LEVEL} candidates=${SOLUTION_MAX_CANDIDATES} review_rounds=${SOLUTION_REVIEW_ROUNDS} budget_ms=${SOLUTION_TIME_BUDGET_MS}\n`
+  );
+  for (let candidate = 1; candidate <= SOLUTION_MAX_CANDIDATES; candidate += 1) {
     try {
-      emitWorkspaceEvent(workspaceId, 'task:update', {
-        stage: 'solution',
-        state: 'running',
-        message: `正在生成标程候选 ${candidate}/3`
-      });
+      assertSolutionBudget(startedAt, `before candidate ${candidate}`);
+      await setSolutionProgress(workspaceId, `正在生成标程候选 ${candidate}/${SOLUTION_MAX_CANDIDATES}`);
       const rawCpp = await generateStdCppCandidate(workspaceId, {
         problem,
         algorithm,
@@ -549,7 +569,9 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
         candidate
       });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: rawCpp.slice(0, 320) });
-      const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate);
+      const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt });
+      assertSolutionBudget(startedAt, `before solution markdown for candidate ${candidate}`);
+      await setSolutionProgress(workspaceId, '正在根据标程生成最终题解');
       const markdown = await generateFinalSolutionMarkdown(workspaceId, {
         problem,
         algorithm,
@@ -558,7 +580,9 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
       });
       ensureSolutionMarkdownStructure(markdown);
       assertSolutionTextLooksReasonable(markdown, verified.cpp);
+      await setSolutionProgress(workspaceId, '正在审查题解与标程一致性');
       await verifyFullScoreReview(workspaceId, markdown, verified.cpp, problem, diffInfo);
+      await setSolutionProgress(workspaceId, '正在用标程校验样例输出');
       await verifySampleWithStd(workspaceId, verified.cpp);
 
       attempts.push({
@@ -583,8 +607,8 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
         state: 'rejected',
         error: lastFailure
       });
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] candidate ${candidate}/3 failed: ${lastFailure}\n`);
-      if (candidate === 3) {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] candidate ${candidate}/${SOLUTION_MAX_CANDIDATES} failed: ${lastFailure}\n`);
+      if (candidate === SOLUTION_MAX_CANDIDATES) {
         const verification = buildVerificationReport({
           problem,
           diffInfo,
@@ -595,13 +619,21 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
           modeLabel
         });
         await writeWorkspaceFile(workspaceId, 'solution/verification.md', verification);
-        const error = new Error(`solution quality gates failed after 3 candidates: ${lastFailure}`);
+        const error = new Error(`solution quality gates failed after ${SOLUTION_MAX_CANDIDATES} candidates: ${lastFailure}`);
         error.statusCode = candidateError.statusCode || 422;
         throw error;
       }
     }
   }
   throw new Error('unreachable solution generation state');
+}
+
+function assertSolutionBudget(startedAt, phase) {
+  const elapsed = Date.now() - startedAt;
+  if (elapsed <= SOLUTION_TIME_BUDGET_MS) return;
+  const error = new Error(`solution generation exceeded ${Math.round(SOLUTION_TIME_BUDGET_MS / 1000)}s budget at ${phase}`);
+  error.statusCode = 408;
+  throw error;
 }
 
 async function persistSolutionArtifacts(workspaceId, fingerprint, { algorithm, markdown, cpp, verification }) {
@@ -716,20 +748,40 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
   return finalText;
 }
 
-async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate) {
+async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt } = {}) {
   let cpp = sanitizeCppCode(rawCpp);
   assertCppLooksReasonable(cpp);
   const gates = [];
+  await setSolutionProgress(workspaceId, `正在编译检查标程候选 ${candidate}`);
   cpp = await repairCppCompilation(workspaceId, cpp, problem);
   gates.push('compile');
+  if (startedAt) assertSolutionBudget(startedAt, `after compile candidate ${candidate}`);
+  await setSolutionProgress(workspaceId, `正在审查标程候选 ${candidate}`);
   cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
   gates.push('llm-code-review');
-  cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
-  gates.push('dual-solution-differential');
-  cpp = await verifyWithBruteOracle(workspaceId, cpp, problem);
-  gates.push(`brute-oracle-${BRUTE_ORACLE_MIN_CASES}+cases`);
-  await verifyWithCounterexampleSearch(workspaceId, cpp, problem);
-  gates.push(`counterexample-search-${COUNTEREXAMPLE_MIN_CASES}+cases`);
+  if (startedAt) assertSolutionBudget(startedAt, `after review candidate ${candidate}`);
+  if (SOLUTION_VERIFICATION_LEVEL === 'strict') {
+    await setSolutionProgress(workspaceId, `正在双解法对拍候选 ${candidate}`);
+    cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
+    gates.push('dual-solution-differential');
+    if (startedAt) assertSolutionBudget(startedAt, `after dual verification candidate ${candidate}`);
+    await setSolutionProgress(workspaceId, `正在暴力 oracle 对拍候选 ${candidate}`);
+    cpp = await verifyWithBruteOracle(workspaceId, cpp, problem);
+    gates.push(`brute-oracle-${BRUTE_ORACLE_MIN_CASES}+cases`);
+    if (startedAt) assertSolutionBudget(startedAt, `after brute oracle candidate ${candidate}`);
+    await setSolutionProgress(workspaceId, `正在反例搜索候选 ${candidate}`);
+    await verifyWithCounterexampleSearch(workspaceId, cpp, problem);
+    gates.push(`counterexample-search-${COUNTEREXAMPLE_MIN_CASES}+cases`);
+  } else {
+    gates.push('skipped-dual-solution-differential');
+    gates.push('skipped-brute-oracle');
+    gates.push('skipped-counterexample-search');
+    await appendWorkspaceLog(
+      workspaceId,
+      'solution.log',
+      `[${stamp()}] strict verification skipped at level=${SOLUTION_VERIFICATION_LEVEL}; set SOLUTION_VERIFICATION_LEVEL=strict to enable dual/brute/counterexample gates\n`
+    );
+  }
   await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] std candidate ${candidate} passed gates: ${gates.join(', ')}\n`);
   return { cpp, gates };
 }
@@ -1722,11 +1774,8 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
 async function crossReviewStdCpp(workspaceId, cpp, problem) {
   let current = String(cpp || '');
   const reviews = [];
-  for (let round = 1; round <= 3; round += 1) {
-    emitWorkspaceEvent(workspaceId, 'task:update', {
-      stage: 'solution', state: 'running',
-      message: `算法审查 ${round}/3`
-    });
+  for (let round = 1; round <= SOLUTION_REVIEW_ROUNDS; round += 1) {
+    await setSolutionProgress(workspaceId, `算法审查 ${round}/${SOLUTION_REVIEW_ROUNDS}`);
     const prevReviewText = round > 1
       ? reviews.map((r, i) => `第${i + 1}轮审查：${r.slice(0, 600)}`).join('\n\n')
       : '';
@@ -1773,10 +1822,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       return current;
     }
 
-    emitWorkspaceEvent(workspaceId, 'task:update', {
-      stage: 'solution', state: 'running',
-      message: `正在按审查意见修复标程 ${round}/3`
-    });
+    await setSolutionProgress(workspaceId, `正在按审查意见修复标程 ${round}/${SOLUTION_REVIEW_ROUNDS}`);
     const fixHistoryText = round > 1
       ? reviews.map((r, i) => `第${i + 1}轮审查意见：${r.slice(0, 400)}`).join('\n\n')
       : '';
@@ -1823,7 +1869,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
       throw compileError;
     }
   }
-  const error = new Error(`code review did not reach PASS after 3 rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
+  const error = new Error(`code review did not reach PASS after ${SOLUTION_REVIEW_ROUNDS} rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
   error.statusCode = 422;
   throw error;
 }
