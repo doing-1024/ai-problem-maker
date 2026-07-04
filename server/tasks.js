@@ -54,7 +54,7 @@ const FEW_SHOT_EXAMPLE = `
 ——从单一算法升级为分层图最短路（复合思维：最短路 + DP/拆点），思维链深度和复合程度都显著提升。
 `;
 
-const SOLUTION_PIPELINE_VERSION = 'std-first-v2';
+const SOLUTION_PIPELINE_VERSION = 'joint-design-v1';
 const DATA_PIPELINE_VERSION = 'data-reliability-v1';
 const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
@@ -142,14 +142,28 @@ export async function generateProblem(workspaceId, payload) {
             '- 提升难度必须以“可写出清晰满分标程”为边界：不要为了贴近目标难度堆叠过多维状态、树/图嵌套、非线性损耗、自由排列、浮点和多阶段限制。若需要提升，只增加 1 个核心难点，并保持输入格式、状态定义和转移可以被 200 行以内 C++17 稳定实现。',
             '- 对原题包含浮点/无解/最小费用等高风险细节时，改编题优先保持线性结构或小规模状态空间，避免同时引入树形遍历、任意顺序、复杂四舍五入和多种容量约束。',
             '',
-            '输出必须是完整 Markdown 题面，结构固定为：',
+            '你必须在同一次连续设计中同时给出题面、满分算法草案和 C++17 标程种子，三者必须完全一致。',
+            '输出格式必须使用以下 HTML 注释分段，不能省略任何分段：',
+            '<!--PROBLEM_MD-->',
+            '完整 Markdown 题面',
+            '<!--PROBLEM_MD_END-->',
+            '<!--ALGORITHM_MD-->',
+            '完整算法草案 Markdown',
+            '<!--ALGORITHM_MD_END-->',
+            '<!--STD_CPP-->',
+            '完整 C++17 标程源码',
+            '<!--STD_CPP_END-->',
+            '',
+            '题面结构固定为：',
             '# 标题',
             '## 题意',
             '## 输入格式',
             '## 输出格式',
             '## 样例',
             '## 数据范围与提示',
-            '不得省略任何一节。标记为 PROBLEM_REWRITE。',
+            '不得省略任何一节。标记为 JOINT_PROBLEM_DESIGN。',
+            '算法草案必须包含：# 算法草案、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。',
+            'std.cpp 必须是完整可编译程序，输入输出严格匹配题面，不要放在 Markdown 代码块里。',
             '⚠️ 提示部分（数据范围与提示）只允许给出方向性提示（如"可以用某种优化结构的 DP"），不允许直接给出状态定义、转移方程、或具体算法名称（如"单调队列"）。',
             '⚠️ 样例部分必须用 HTML 注释标记样例输入和输出的代码块，格式如下：',
             '',
@@ -173,12 +187,12 @@ export async function generateProblem(workspaceId, payload) {
         {
           role: 'user',
     content: [
-      'PROBLEM_REWRITE',
+      'JOINT_PROBLEM_DESIGN',
       `难度模式: ${difficultyMode}`,
       `难度说明: ${payload.difficultyText || ''}`,
       `用户难度要求: ${difficultyInstruction}`,
       `改编策略: ${adaptationInstruction}`,
-      '工程可验证性要求: 题面必须能稳定生成、编译和验证满分 C++17 标程；不要把题目升级成需要大量自由遍历排列、多维复杂 DP 或超长代码的形式。',
+      '工程可验证性要求: 题面必须能稳定生成、编译和验证满分 C++17 标程；同一轮输出的算法草案和 std.cpp 必须能证明题面难度与可靠性。',
       `难度分级参考：`,
             DIFFICULTY_TAXONOMY,
             'SOURCE_TEXT:',
@@ -186,9 +200,9 @@ export async function generateProblem(workspaceId, payload) {
           ].join('\n')
         }
       ];
-      let content = await callLLM(prompt, {
+      let designText = await callLLM(prompt, {
         temperature: 0.3,
-        maxTokens: 8192,
+        maxTokens: 12000,
         retries: 5,
         onComplete: async info => {
           await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
@@ -202,6 +216,8 @@ export async function generateProblem(workspaceId, payload) {
           await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
         }
       });
+      let design = parseJointDesignBundle(designText);
+      let content = design.problem;
       emitProblemPreview(workspaceId, content);
       if (!looksLikeProblemMarkdown(content)) {
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在修正题面格式' });
@@ -248,6 +264,14 @@ export async function generateProblem(workspaceId, payload) {
       content = await reviewAndReviseProblem(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
+      if (design.algorithm) {
+        await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm.slice(0, 320) });
+      }
+      if (design.cpp) {
+        await writeWorkspaceFile(workspaceId, 'solution/std.cpp', design.cpp);
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: design.cpp.slice(0, 320) });
+      }
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
       await updateWorkspaceMeta(workspaceId, {
         difficulty: {
@@ -455,6 +479,19 @@ function emitProblemPreview(workspaceId, content) {
   });
 }
 
+function parseJointDesignBundle(text) {
+  const raw = String(text || '');
+  const problem = extractBetween(raw, '<!--PROBLEM_MD-->', '<!--PROBLEM_MD_END-->').trim();
+  const algorithm = extractBetween(raw, '<!--ALGORITHM_MD-->', '<!--ALGORITHM_MD_END-->').trim();
+  const cppBlock = extractBetween(raw, '<!--STD_CPP-->', '<!--STD_CPP_END-->').trim();
+  const cpp = sanitizeCppCode(cppBlock);
+  return {
+    problem: problem || raw,
+    algorithm,
+    cpp
+  };
+}
+
 async function logLLMComplete(workspaceId, logName, label, info) {
   const usage = info?.usage ? ` usage=${JSON.stringify(info.usage)}` : '';
   await appendWorkspaceLog(
@@ -495,13 +532,18 @@ export async function generateSolution(workspaceId) {
         ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
         : '';
 
-      await setSolutionProgress(workspaceId, '正在生成算法草案');
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start std-first solution pipeline ${SOLUTION_PIPELINE_VERSION}\n`);
+      await setSolutionProgress(workspaceId, '正在读取联合设计产物');
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start joint-design solution pipeline ${SOLUTION_PIPELINE_VERSION}\n`);
 
-      const algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
+      let algorithm = await safeRead(workspaceId, 'solution/algorithm.md');
+      if (!algorithm.trim()) {
+        await setSolutionProgress(workspaceId, '正在生成算法草案');
+        algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
+      }
+      const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
-      const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo });
+      const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
       await persistSolutionArtifacts(workspaceId, fingerprint, result);
       return { ...result, cached: false };
     } catch (error) {
@@ -551,7 +593,7 @@ export async function regenerateStdSolution(workspaceId) {
   });
 }
 
-async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, modeLabel = 'full' }) {
+async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, modeLabel = 'full', seedCpp = '' }) {
   let lastFailure = '';
   const attempts = [];
   const startedAt = Date.now();
@@ -563,14 +605,17 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
   for (let candidate = 1; candidate <= SOLUTION_MAX_CANDIDATES; candidate += 1) {
     try {
       assertSolutionBudget(startedAt, `before candidate ${candidate}`);
-      await setSolutionProgress(workspaceId, `正在生成标程候选 ${candidate}/${SOLUTION_MAX_CANDIDATES}`);
-      const rawCpp = await generateStdCppCandidate(workspaceId, {
-        problem,
-        algorithm,
-        diffInfo,
-        lastFailure,
-        candidate
-      });
+      const usingSeed = candidate === 1 && String(seedCpp || '').trim();
+      await setSolutionProgress(workspaceId, usingSeed ? '正在验证联合设计标程种子' : `正在生成标程候选 ${candidate}/${SOLUTION_MAX_CANDIDATES}`);
+      const rawCpp = usingSeed
+        ? seedCpp
+        : await generateStdCppCandidate(workspaceId, {
+            problem,
+            algorithm,
+            diffInfo,
+            lastFailure,
+            candidate
+          });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: rawCpp.slice(0, 320) });
       const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt });
       assertSolutionBudget(startedAt, `before solution markdown for candidate ${candidate}`);
@@ -591,7 +636,7 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
       attempts.push({
         candidate,
         state: 'accepted',
-        gates: verified.gates
+        gates: usingSeed ? ['joint-design-seed', ...verified.gates] : verified.gates
       });
       const verification = buildVerificationReport({
         problem,

@@ -105,7 +105,7 @@
             </div>
           </div>
           <button class="button small block" @click="regenerateStd" :disabled="!files.includes('solution/algorithm.md')">
-            重生成标程
+            重验/修复标程
           </button>
         </section>
 
@@ -236,19 +236,19 @@ const pipeline = computed(() => [
   },
   {
     key: 'problem',
-    label: '改编题面',
+    label: '联合设计',
     state: status.value.problem?.state || 'idle',
-    message: status.value.problem?.message || '生成 problem.md',
-    actionLabel: '生成',
+    message: status.value.problem?.message || '同一上下文设计题面、算法判断和标程种子',
+    actionLabel: '设计',
     action: generateProblem,
     disabled: !workspaceId.value
   },
   {
     key: 'solution',
-    label: '题解标程',
+    label: '题解转写/验标',
     state: status.value.solution?.state || 'idle',
-    message: status.value.solution?.message || '生成 solution.md 与 std.cpp',
-    actionLabel: '生成',
+    message: status.value.solution?.message || '验证 std.cpp，并把思路讲成题解',
+    actionLabel: '验标',
     action: generateSolution,
     disabled: !workspaceId.value || !files.value.includes('problem/problem.md')
   },
@@ -266,9 +266,10 @@ const pipeline = computed(() => [
 const pipelineDone = computed(() => pipeline.value.filter(step => step.state === 'done').length);
 const qualityItems = computed(() => [
   { label: '题面已生成', pass: files.value.includes('problem/problem.md') },
-  { label: '算法草案已生成', pass: files.value.includes('solution/algorithm.md') },
-  { label: '题解已生成', pass: files.value.includes('solution/solution.md') },
-  { label: '标程已生成并通过编译流程', pass: files.value.includes('solution/std.cpp') && status.value.solution?.state === 'done' },
+  { label: '联合算法草案已生成', pass: files.value.includes('solution/algorithm.md') },
+  { label: '联合标程种子已生成', pass: files.value.includes('solution/std.cpp') },
+  { label: '题解转写已生成', pass: files.value.includes('solution/solution.md') },
+  { label: '标程已通过验证流程', pass: files.value.includes('solution/std.cpp') && status.value.solution?.state === 'done' },
   { label: '标程验证报告已生成', pass: files.value.includes('solution/verification.md') },
   { label: '数据方案已生成', pass: files.value.includes('data/hack_plan.md') },
   { label: '数据生成器已生成', pass: files.value.includes('data/gen.py') },
