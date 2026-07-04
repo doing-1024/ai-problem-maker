@@ -199,36 +199,56 @@ export async function generateProblem(workspaceId, payload) {
         }
       ];
       const designMessages = prompt;
-      let designText = await callLLM(designMessages, {
-        temperature: 0.3,
-        maxTokens: 4096,
-        retries: 5,
-        onComplete: async info => {
-          await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
-        },
-        onRetry: async ({ attempt, retries, error }) => {
-          emitWorkspaceEvent(workspaceId, 'task:update', {
-            stage: 'problem',
-            state: 'running',
-            message: `题目生成重试 ${attempt + 1}/${retries}`
-          });
-          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
-        }
-      });
+      let designText;
+      try {
+        designText = await callLLM(designMessages, {
+          temperature: 0.3,
+          maxTokens: 4096,
+          retries: 5,
+          onComplete: async info => {
+            await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
+          },
+          onRetry: async ({ attempt, retries, error }) => {
+            emitWorkspaceEvent(workspaceId, 'task:update', {
+              stage: 'problem',
+              state: 'running',
+              message: `题目生成重试 ${attempt + 1}/${retries}`
+            });
+            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
+          }
+        });
+      } catch (error) {
+        if (!isProviderMethodError(error)) throw error;
+        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design primary prompt failed with provider method error, using compact prompt\n`);
+        emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在使用兼容模式联合设计' });
+        designText = await callLLM(buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction }), {
+          temperature: 0.25,
+          maxTokens: 4096,
+          retries: 5,
+          onComplete: async info => {
+            await logLLMComplete(workspaceId, 'problem.log', 'compact joint design', info);
+          },
+          onRetry: async ({ attempt, retries, error }) => {
+            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] compact joint retry ${attempt + 1}/${retries}: ${error.message}\n`);
+          }
+        });
+      }
       let design = parseJointDesignBundle(designText);
-      const cppText = await callLLM([
-        ...designMessages,
-        { role: 'assistant', content: designText },
-        {
-          role: 'user',
-          content: [
-            'JOINT_STD_CPP',
-            '请基于上面你刚设计的题面和算法草案，继续输出完整 C++17 标程源码。',
-            '只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。',
-            '必须可独立编译，必须包含 main，输入输出严格匹配题面，代码尽量简洁，不超过 220 行。'
-          ].join('\n')
-        }
-      ], {
+      let cppText = '';
+      try {
+        cppText = await callLLM([
+          ...designMessages,
+          { role: 'assistant', content: designText },
+          {
+            role: 'user',
+            content: [
+              'JOINT_STD_CPP',
+              '请基于上面你刚设计的题面和算法草案，继续输出完整 C++17 标程源码。',
+              '只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。',
+              '必须可独立编译，必须包含 main，输入输出严格匹配题面，代码尽量简洁，不超过 220 行。'
+            ].join('\n')
+          }
+        ], {
         temperature: 0.15,
         maxTokens: 8192,
         retries: 5,
@@ -244,6 +264,10 @@ export async function generateProblem(workspaceId, payload) {
           await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint std retry ${attempt + 1}/${retries}: ${error.message}\n`);
         }
       });
+      } catch (error) {
+        if (!isProviderMethodError(error)) throw error;
+        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint std seed skipped after provider method error; solution stage will regenerate std.cpp\n`);
+      }
       design.cpp = design.cpp || sanitizeCppCode(cppText);
       let content = design.problem;
       emitProblemPreview(workspaceId, content);
@@ -518,6 +542,53 @@ function parseJointDesignBundle(text) {
     algorithm,
     cpp
   };
+}
+
+function isProviderMethodError(error) {
+  return /HTTP Error 405|Method Not Allowed/i.test(String(error?.message || ''));
+}
+
+function buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstruction, adaptationInstruction }) {
+  return [
+    {
+      role: 'system',
+      content: [
+        '你是 OI 联合设计 agent。一次性设计题面和满分算法草案，后续会继续让你写 std.cpp。',
+        '难度和可靠性同等重要：题目必须符合目标难度，也必须能写出清晰可验证的 C++17 满分标程。',
+        '不要堆叠多个复杂机制；只增加一个核心难点。题面、算法草案必须一致。',
+        '输出只使用以下分段：',
+        '<!--PROBLEM_MD-->',
+        '# 标题',
+        '## 题意',
+        '## 输入格式',
+        '## 输出格式',
+        '## 样例',
+        '## 数据范围与提示',
+        '<!--PROBLEM_MD_END-->',
+        '<!--ALGORITHM_MD-->',
+        '# 算法草案',
+        '## 难度命中理由',
+        '## 约束提取',
+        '## 算法选择',
+        '## 正确性要点',
+        '## 复杂度目标',
+        '## 高风险反例',
+        '<!--ALGORITHM_MD_END-->',
+        '样例代码块仍需用 <!--SAMPLE_INPUT--> / <!--SAMPLE_OUTPUT--> 标记。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'JOINT_PROBLEM_DESIGN_COMPACT',
+        `难度模式: ${difficultyMode}`,
+        `用户难度要求: ${difficultyInstruction}`,
+        `改编策略: ${adaptationInstruction}`,
+        '原题素材:',
+        source || ''
+      ].join('\n')
+    }
+  ];
 }
 
 async function logLLMComplete(workspaceId, logName, label, info) {
