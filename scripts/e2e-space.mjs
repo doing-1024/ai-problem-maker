@@ -51,6 +51,7 @@ const baseUrl = String(args.baseUrl || process.env.APM_BASE_URL || DEFAULT_BASE_
 const timeoutMs = Number(args.timeoutMs || process.env.APM_E2E_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
 const requestTimeoutMs = Number(args.requestTimeoutMs || process.env.APM_E2E_REQUEST_TIMEOUT_MS || 240000);
 const rateLimitRetries = Number(args.rateLimitRetries || process.env.APM_E2E_RATE_LIMIT_RETRIES || 2);
+const dumpDir = args.dumpDir ? String(args.dumpDir) : '';
 const difficultyMode = String(args.difficultyMode || 'custom');
 const difficultyText = String(args.difficultyText || 'CSP-S T4');
 const sourceText = args.problemFile ? await fs.readFile(String(args.problemFile), 'utf8') : P1016;
@@ -66,6 +67,7 @@ try {
 
   workspace = await step('create workspace', async () => api('/api/workspaces', { method: 'POST' }));
   console.log(`workspace=${workspace.workspaceId}`);
+  console.log(`accessToken=${workspace.accessToken}`);
 
   await step('save raw problem', async () => {
     await api(`/api/workspaces/${workspace.workspaceId}/files/input/problem_raw.md`, {
@@ -151,6 +153,10 @@ try {
     assert.ok(files.files.includes(required), `missing ${required}`);
   }
 
+  if (dumpDir) {
+    await step('dump artifacts', async () => dumpArtifacts(files.files));
+  }
+
   console.log('E2E PASS');
 } catch (error) {
   failed = true;
@@ -163,6 +169,9 @@ try {
 } finally {
   if (workspace?.workspaceId) {
     console.log(`workspace_url=${baseUrl}/?workspace=${workspace.workspaceId}`);
+    if (workspace.accessToken) {
+      console.log(`download_cmd=curl -L -H 'x-workspace-token: ${workspace.accessToken}' '${baseUrl}/api/workspaces/${workspace.workspaceId}/download' -o ${workspace.workspaceId}.zip`);
+    }
   }
   process.exit(failed ? 1 : 0);
 }
@@ -268,6 +277,21 @@ async function readTextFile(file) {
   const text = await res.text();
   if (!res.ok) throw new Error(`read ${file} failed: ${text}`);
   return text;
+}
+
+async function dumpArtifacts(files) {
+  await fs.mkdir(dumpDir, { recursive: true });
+  await fs.writeFile(`${dumpDir}/workspace.json`, JSON.stringify({
+    baseUrl,
+    workspaceId: workspace.workspaceId,
+    accessToken: workspace.accessToken,
+    files
+  }, null, 2));
+  for (const file of files) {
+    if (file.endsWith('.zip')) continue;
+    const target = `${dumpDir}/${file.replaceAll('/', '__')}`;
+    await fs.writeFile(target, await readTextFile(file), 'utf8');
+  }
 }
 
 async function api(path, options = {}) {

@@ -374,8 +374,10 @@ export async function generateProblem(workspaceId, payload) {
           await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] aligned artifacts skipped: ${error.message}\n`);
         }
       }
+      content = sanitizeMarkdownArtifact(content);
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       if (design.algorithm) {
+        design.algorithm = sanitizeMarkdownArtifact(design.algorithm);
         await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm.slice(0, 320) });
       }
@@ -784,6 +786,7 @@ export async function generateSolution(workspaceId) {
         algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
       }
       const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
+      algorithm = sanitizeMarkdownArtifact(algorithm);
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
       const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
@@ -928,6 +931,9 @@ function assertSolutionBudget(startedAt, phase) {
 }
 
 async function persistSolutionArtifacts(workspaceId, fingerprint, { algorithm, markdown, cpp, verification }) {
+  algorithm = sanitizeMarkdownArtifact(algorithm);
+  markdown = sanitizeMarkdownArtifact(markdown);
+  verification = sanitizeMarkdownArtifact(verification);
   await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
   await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
   await writeWorkspaceFile(workspaceId, 'solution/solution.md', markdown);
@@ -1215,6 +1221,7 @@ export async function generateDataPlan(workspaceId) {
             '数据范围、测试点规模必须对齐目标难度。',
             '输出必须是 Markdown，严格包含 # 数据方案 和 ## 点数分布。',
             '各测试点的 N 值（或其他规模参数）必须具体写明，后续 gen.py 会以此为准生成数据。不要出现方案中写 N=2e5 但实际生成器用 N=5000 的矛盾。'
+            + '若题面写了“输入保证”或“保证”类硬约束，所有测试点必须严格满足这些约束；不能为了测试无解而生成违反题面保证的非法输入。'
           ].join('\n')
         },
         { role: 'user', content: ['DATA_PLAN', diffInfo, 'SOURCE_TEXT:', solution || ''].filter(Boolean).join('\n') }
@@ -1249,7 +1256,8 @@ export async function generateDataPlan(workspaceId) {
             '只输出纯 Python 代码，不要用 Markdown 代码块包裹，不要添加任何解释说明。',
             '生成的数据文件（如 1.in）必须直接写入当前工作目录，不要创建子目录。',
             '数据的输入格式必须严格对标给定 C++ 标程的 cin 读入顺序和数据类型，不可自创格式。',
-            '数据方案中声明的 N 值必须与 gen.py 实际使用的 N 值一致。如果出于合理原因（如防 long long 溢出）需要改小 N，请确保数据方案的说明也随之同步更新，不要出现方案说 N=2e5 但代码实际用 N=5000 的矛盾。'
+            '数据方案中声明的 N 值必须与 gen.py 实际使用的 N 值一致。如果出于合理原因（如防 long long 溢出）需要改小 N，请确保数据方案的说明也随之同步更新，不要出现方案说 N=2e5 但代码实际用 N=5000 的矛盾。',
+            '必须严格满足题面所有“输入保证”约束；例如题面保证相邻距离 <= C 时，不得构造 gap > C 的 impossible case。'
           ].join('\n')
         },
         {
@@ -1285,6 +1293,7 @@ export async function generateDataPlan(workspaceId) {
       genPy = extractPythonCode(genPy) || genPy;
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
+      assertDataArtifactsRespectProblemGuarantees(problemMd, plan, genPy, '');
       plan = await validateDataPlanGenConsistency(workspaceId, plan, genPy, diffInfo);
 
       const validatorPy = await generateInputValidator(workspaceId, {
@@ -1293,6 +1302,7 @@ export async function generateDataPlan(workspaceId) {
         genPy,
         diffInfo
       });
+      assertDataArtifactsRespectProblemGuarantees(problemMd, plan, genPy, validatorPy);
       let checkerCpp = '';
       if (problemType.requiresChecker) {
         checkerCpp = await generateCheckerCpp(workspaceId, {
@@ -1389,6 +1399,7 @@ export async function runDataGenerator(workspaceId) {
 
     let currentStdCpp = stdCpp;
     let currentGenPy = genPy;
+    const problemMd = await safeRead(workspaceId, 'problem/problem.md');
     let lastError = null;
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1403,6 +1414,7 @@ export async function runDataGenerator(workspaceId) {
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
         assertDataZipLooksValid(result.zipContent);
         await verifyZipArchive(result.zipContent);
+        await assertGeneratedInputsRespectProblemGuarantees(problemMd, result.zipContent);
         const finalFingerprint = hashText(JSON.stringify({
           version: DATA_PIPELINE_VERSION,
           genPy: currentGenPy,
@@ -1438,7 +1450,7 @@ export async function runDataGenerator(workspaceId) {
         const isRetryable = isGeneratorError || isStdError;
         if (!isRetryable || attempt === 3) break;
 
-        const problem = await safeRead(workspaceId, 'problem/problem.md');
+        const problem = problemMd;
         if (isGeneratorError) {
           emitWorkspaceEvent(workspaceId, 'task:update', {
             stage: 'data', state: 'running',
@@ -1563,7 +1575,10 @@ export const __testHooks = {
   verifyWithBruteOracle,
   verifyFullScoreReview,
   sanitizeCppCode,
-  reviewPassed
+  reviewPassed,
+  sanitizeMarkdownArtifact,
+  detectProblemGuarantees,
+  assertDataArtifactsRespectProblemGuarantees
 };
 
 async function executePythonGenerator(workspaceId, { genPy, stdCpp, validatorPy, problemType, checkerCpp }) {
@@ -1804,6 +1819,28 @@ function extractCodeBlock(text, lang) {
 
 function stripCppBlock(text) {
   return text.replace(/```cpp[\s\S]*?```/gi, '').trim();
+}
+
+function sanitizeMarkdownArtifact(text) {
+  const markers = [
+    'PROBLEM_REVISE',
+    'PROBLEM_REVIEW',
+    'PROBLEM_REWRITE',
+    'JOINT_PROBLEM_DESIGN',
+    'JOINT_PROBLEM_DESIGN_COMPACT',
+    'FINAL_PROBLEM_ALGORITHM',
+    'SOLUTION_FROM_STD',
+    'SOLUTION_FINAL',
+    'SOLUTION_REPAIR',
+    'DATA_PLAN',
+    'DATA_PLAN_FIX'
+  ];
+  let content = String(text || '');
+  for (const marker of markers) {
+    content = content.replace(new RegExp(`^\\s*(?:标记为[:：]?\\s*)?${marker}\\s*$`, 'gmi'), '');
+  }
+  content = content.replace(/\n{3,}/g, '\n\n').trim();
+  return content;
 }
 
 function sanitizeCppCode(text) {
@@ -3215,6 +3252,87 @@ function assertDataPlanLooksReasonable(plan, genPy) {
     const error = new Error('data output is too short');
     error.statusCode = 422;
     throw error;
+  }
+}
+
+function detectProblemGuarantees(problemMd) {
+  const text = String(problemMd || '');
+  const normalized = text.replace(/\s+/g, ' ');
+  return {
+    adjacentDistanceLeCapacity: /X_\{?i\}?\s*-\s*X_\{?i-1\}?\s*\\?le|X_i\s*-\s*X_\{?i-1\}?\s*<=|相邻[^。；\n]*(?:不超过|<=|≤)[^。；\n]*C|每段[^。；\n]*(?:不超过|<=|≤)[^。；\n]*C/i.test(normalized),
+    finalDistanceLeCapacity: /D\s*-\s*X_\{?N\}?\s*\\?le|D\s*-\s*X_N\s*<=|最后[^。；\n]*(?:不超过|<=|≤)[^。；\n]*C|终点[^。；\n]*(?:不超过|<=|≤)[^。；\n]*C/i.test(normalized)
+  };
+}
+
+function assertDataArtifactsRespectProblemGuarantees(problemMd, plan, genPy, validatorPy = '') {
+  const guarantees = detectProblemGuarantees(problemMd);
+  const combined = `${plan || ''}\n${genPy || ''}`;
+  if (guarantees.adjacentDistanceLeCapacity || guarantees.finalDistanceLeCapacity) {
+    const suspicious = [
+      /impossible/i,
+      /无解数据/,
+      /gap\s*>\s*C/i,
+      />\s*C/,
+      /C\s*\+\s*random/i,
+      /C\s*\+\s*randint/i,
+      /距离超过.*C/,
+      /大于.*C/
+    ];
+    if (suspicious.some(re => re.test(combined))) {
+      const error = new Error('data plan/gen.py violates problem reachability guarantees');
+      error.statusCode = 422;
+      throw error;
+    }
+  }
+  if ((guarantees.adjacentDistanceLeCapacity || guarantees.finalDistanceLeCapacity) && validatorPy) {
+    const validator = String(validatorPy || '');
+    if (/skip hard failing|不会?失败|不检查|skip/i.test(validator) && /gap|距离|X_i|X\[i\]|C/.test(validator)) {
+      const error = new Error('validator.py appears to skip problem distance guarantees');
+      error.statusCode = 422;
+      throw error;
+    }
+  }
+}
+
+async function assertGeneratedInputsRespectProblemGuarantees(problemMd, zipContent) {
+  const guarantees = detectProblemGuarantees(problemMd);
+  if (!guarantees.adjacentDistanceLeCapacity && !guarantees.finalDistanceLeCapacity) return;
+  const zipHex = Buffer.from(zipContent).toString('hex');
+  const checker = `
+import sys, zipfile, tempfile, pathlib
+data = bytes.fromhex(${JSON.stringify(zipHex)})
+tmp = pathlib.Path(tempfile.mkdtemp()) / "datas.zip"
+tmp.write_bytes(data)
+bad = []
+with zipfile.ZipFile(tmp) as zf:
+    for name in sorted(n for n in zf.namelist() if n.endswith(".in")):
+        vals = list(map(int, zf.read(name).decode().split()))
+        if len(vals) < 4:
+            bad.append(f"{name}: too few tokens")
+            continue
+        N, D, C, K = vals[:4]
+        pairs = list(zip(vals[4::2], vals[5::2]))
+        if len(pairs) != N + 1:
+            bad.append(f"{name}: station count {len(pairs)} != {N + 1}")
+            continue
+        X = [x for x, _ in pairs]
+        if ${guarantees.adjacentDistanceLeCapacity ? 'True' : 'False'}:
+            for i in range(1, len(X)):
+                if X[i] - X[i - 1] > C:
+                    bad.append(f"{name}: gap {i}={X[i]-X[i-1]} > C={C}")
+                    break
+        if ${guarantees.finalDistanceLeCapacity ? 'True' : 'False'} and D - X[-1] > C:
+            bad.append(f"{name}: final gap {D-X[-1]} > C={C}")
+if bad:
+    print("\\n".join(bad[:20]), file=sys.stderr)
+    sys.exit(1)
+`;
+  try {
+    await runPython(checker, 30000);
+  } catch (error) {
+    const wrapped = new Error(`generated data violates problem guarantees: ${error.message}`);
+    wrapped.statusCode = 422;
+    throw wrapped;
   }
 }
 

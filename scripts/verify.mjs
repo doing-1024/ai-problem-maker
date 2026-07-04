@@ -30,6 +30,23 @@ assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nPASS\nok'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nFAIL\nbad'), false);
 assert.equal(__testHooks.reviewPassed('标记为 CODE_REVIEW\n\n### 结论\n**PASS**'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\n\n结论：FAIL'), false);
+assert.equal(
+  __testHooks.sanitizeMarkdownArtifact('PROBLEM_REVISE\n\n# 标题\n\nSOLUTION_FROM_STD\n\n正文'),
+  '# 标题\n\n正文'
+);
+assert.equal(
+  __testHooks.detectProblemGuarantees('输入保证对于所有 1 <= i <= N 有 X_i - X_{i-1} <= C，且 D - X_N <= C。').adjacentDistanceLeCapacity,
+  true
+);
+assert.throws(
+  () => __testHooks.assertDataArtifactsRespectProblemGuarantees(
+    '输入保证对于所有 1 <= i <= N 有 X_i - X_{i-1} <= C，且 D - X_N <= C。',
+    '## 点数分布\n- impossible case: gap > C',
+    'X[i] = X[i-1] + C + random.randint(1, 100)',
+    ''
+  ),
+  /violates problem reachability guarantees/
+);
 
 const workspace = await createWorkspace();
 assert.ok(workspace.workspaceId);
