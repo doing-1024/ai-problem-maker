@@ -169,6 +169,9 @@ function mockLLM(messages, options = {}) {
   if (joined.includes('FINAL_PROBLEM_ALGORITHM')) {
     return `# 算法草案
 
+## 题目重述
+给定整数个数 n 和 n 个整数，输出所有整数之和。
+
 ## 难度命中理由
 本地 mock 使用顺序扫描模型，重点验证流程对齐逻辑。
 
