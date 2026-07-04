@@ -47,6 +47,41 @@ assert.throws(
   ),
   /violates problem reachability guarantees/
 );
+const riskyProblem = [
+  '# 树上补给查询',
+  '## 题意',
+  '给定一棵 n 个点的树，每个点有油价和补给容量。q 次操作，每次修改点权或询问 u 到 v 路径上汽车容量 C 下的最小费用。',
+  '## 数据范围与提示',
+  'n,q <= 200000。'
+].join('\n');
+assert.equal(__testHooks.assessAlgorithmReliability(riskyProblem, '## 算法选择\n使用树链剖分、DFN 序和线段树优化路径贪心。').level, 'high');
+assert.throws(
+  () => __testHooks.assertAlgorithmReliabilityContract(
+    riskyProblem,
+    '# 算法草案\n## 题目重述\n树上路径查询。\n## 约束提取\nn,q<=2e5。\n## 算法选择\n使用树链剖分、DFN 序和线段树优化路径贪心。\n## 正确性要点\n显然正确。\n## 复杂度目标\nO(log^2 n)。\n## 高风险反例\n无。'
+  ),
+  /algorithm reliability contract incomplete/
+);
+assert.doesNotThrow(
+  () => __testHooks.assertAlgorithmReliabilityContract(
+    riskyProblem,
+    [
+      '# 算法草案',
+      '## 题目重述',
+      '维护树上 u 到 v 的容量补给最小费用查询。',
+      '## 约束提取',
+      'n,q<=2e5，容量 C 离散到 K<=30 个关键余量。',
+      '## 算法选择',
+      '每个线段树片段维护状态 trans[a]=从片段左端进入且剩余油量为 a 时，到右端的最小费用和离开余量；状态只依赖片段内部点。两个相邻片段的合并规则为 compose(A,B)[a]=B[A[a].remain].cost+A[a].cost，merge/combine 是函数复合，因此满足结合律，可用于树链剖分拆出的有序片段。反向路径维护另一套 reversed trans。',
+      '## 正确性要点',
+      '不变量：每个片段信息精确表示经过该片段的最优转移；叶子按单点补给枚举得到，父节点由左右片段转移复合得到。函数复合保持最优子结构，因此任意路径按顺序合并后得到全路径答案。DFN 只用于拆分重链区间，不假设跨链路径在 DFS 序上连续。',
+      '## 复杂度目标',
+      '每个片段合并 O(K)，修改 O(K log n)，查询 O(K log^2 n)，空间 O(Kn)。',
+      '## 高风险反例',
+      '覆盖跨轻边路径、反向路径、容量为 0、某段不可达、相同油价导致多种最优。'
+    ].join('\n')
+  )
+);
 
 const workspace = await createWorkspace();
 assert.ok(workspace.workspaceId);

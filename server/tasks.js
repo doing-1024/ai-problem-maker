@@ -54,7 +54,8 @@ const FEW_SHOT_EXAMPLE = `
 ——从单一算法升级为分层图最短路（复合思维：最短路 + DP/拆点），思维链深度和复合程度都显著提升。
 `;
 
-const SOLUTION_PIPELINE_VERSION = 'joint-design-v1';
+const PROBLEM_PIPELINE_VERSION = 'problem-reliability-contract-v1';
+const SOLUTION_PIPELINE_VERSION = 'joint-design-contract-v1';
 const DATA_PIPELINE_VERSION = 'data-reliability-v1';
 const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
@@ -124,6 +125,7 @@ export async function generateProblem(workspaceId, payload) {
       const fingerprint = hashText(
         JSON.stringify({
           source,
+          version: PROBLEM_PIPELINE_VERSION,
           difficultyMode: payload.difficultyMode || 'same',
           difficultyText: payload.difficultyText || ''
         })
@@ -155,6 +157,8 @@ export async function generateProblem(workspaceId, payload) {
             '- 提升难度必须以“可写出清晰满分标程”为边界：不要为了贴近目标难度堆叠过多维状态、树/图嵌套、非线性损耗、自由排列、浮点和多阶段限制。若需要提升，只增加 1 个核心难点，并保持输入格式、状态定义和转移可以被 200 行以内 C++17 稳定实现。',
             '- 对原题包含浮点/无解/最小费用等高风险细节时，改编题优先保持线性结构或小规模状态空间，避免同时引入树形遍历、任意顺序、复杂四舍五入和多种容量约束。',
             '- 可靠性硬约束：如果设计容量/能量 DP，必须保证状态数 N*C 或 事件数*C 不超过 2e7；若数据范围更大，算法草案必须给出明确可实现的 O(N log N) 或 O(N log C) 转移，不能只写“线段树优化/单调队列优化”而不给出可验证转移。',
+            '- 算法契约要求：复杂题可以使用树、图、动态查询、容量/能量、数据结构复合等任意题型，但算法草案必须写清楚可验证契约：状态含义、转移/合并规则、不变量或单调性来源、复杂度推导、容易错的反例边界。只写算法名（如 HLD、DFN、线段树优化、二分、单调队列）不算契约。',
+            '- 若使用路径/区间数据结构维护 DP 或贪心状态，必须说明每个节点保存什么信息、两个相邻片段如何合并，以及为什么合并满足结合律/可组合性；若依赖二分或 DFN 顺序，必须说明单调性或顺序性质。',
             '- 不要设计“每站至多一次购买、正整数购买、到站截断、跨点倍增”等多限制叠加题；这类题很容易使 std.cpp 和题解不稳定。',
             '',
             '你必须在同一次连续设计中同时给出题面、满分算法草案和 C++17 标程种子，三者必须完全一致。',
@@ -275,6 +279,7 @@ export async function generateProblem(workspaceId, payload) {
         });
       }
       let design = parseJointDesignBundle(designText);
+      assertAlgorithmReliabilityContract(design.problem, design.algorithm);
       const originalDesignProblem = design.problem;
       let cppText = '';
       try {
@@ -357,6 +362,9 @@ export async function generateProblem(workspaceId, payload) {
       content = await completeProblemMarkdown(workspaceId, content, source, difficultyInstruction, difficultyMode);
       content = await reviewAndReviseProblem(workspaceId, content, source, difficultyInstruction, difficultyMode);
       ensureProblemMarkdownStructure(content);
+      if (design.algorithm) {
+        assertAlgorithmReliabilityContract(content, design.algorithm);
+      }
       if (jointArtifactsNeedRealignment(originalDesignProblem, content, design)) {
         await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] final problem changed after review; regenerating aligned algorithm/std seed\n`);
         emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在对齐最终题面、思路和标程种子' });
@@ -378,6 +386,7 @@ export async function generateProblem(workspaceId, payload) {
       await writeWorkspaceFile(workspaceId, 'problem/problem.md', content);
       if (design.algorithm) {
         design.algorithm = sanitizeMarkdownArtifact(design.algorithm);
+        assertAlgorithmReliabilityContract(content, design.algorithm);
         await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
         emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm.slice(0, 320) });
       }
@@ -625,6 +634,8 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
         '算法草案要服务于后续 std.cpp 生成，必须具体、可实现、和题面完全一致。',
         '不要引用旧题面、旧样例或旧变量名。标记为 FINAL_PROBLEM_ALGORITHM。',
         '可靠性硬约束：如果使用容量/能量 DP，必须核算状态总量并保证 N*C 或 事件数*C 不超过 2e7；若超过，必须改用明确可实现的优化算法或指出题面需降低范围。',
+        '复杂题必须给出算法契约：状态含义、转移/合并规则、不变量或单调性来源、复杂度推导、反例边界。允许高复杂组合，但不能只写算法名称。',
+        '如果用树链剖分、DFN、线段树、倍增等维护路径/区间状态，必须说明每个片段保存的信息、片段合并规则，以及合并为什么可结合/可组合。',
         '输出 Markdown，必须包含：# 算法草案、## 题目重述、## 难度命中理由、## 约束提取、## 算法选择、## 正确性要点、## 复杂度目标、## 高风险反例。'
       ].join('\n')
     },
@@ -650,6 +661,7 @@ async function generateAlignedJointArtifacts(workspaceId, { problem, difficultyI
     }
   });
   ensureAlgorithmPlanLooksReasonable(algorithm);
+  assertAlgorithmReliabilityContract(problem, algorithm);
 
   const cppText = await callLLM([
     {
@@ -700,6 +712,8 @@ function buildCompactJointDesignPrompt({ source, difficultyMode, difficultyInstr
         '难度和可靠性同等重要：题目必须符合目标难度，也必须能写出清晰可验证的 C++17 满分标程。',
         '不要堆叠多个复杂机制；只增加一个核心难点。题面、算法草案必须一致。',
         '可靠性硬约束：若使用容量/能量 DP，状态数 N*C 或 事件数*C 必须不超过 2e7；若范围更大，必须给出明确可实现的 O(N log N)/O(N log C) 算法。禁止只写“线段树优化/单调队列优化”但没有可验证转移。',
+        '算法契约要求：允许树、动态查询、容量/能量、数据结构复合等复杂题型，但算法草案必须写出状态含义、转移/合并规则、不变量或单调性来源、复杂度推导、反例边界。只写 HLD/DFN/线段树/二分/单调队列 等名称不算可验证算法。',
+        '若路径/区间结构维护 DP 或贪心状态，必须说明片段信息和合并规则，并说明合并可结合/可组合；若依赖二分或 DFN 顺序，必须说明单调性或顺序性质。',
         '避免多限制叠加：不要同时设计每站至多一次购买、正整数购买、到站截断、跨点倍增等多个高风险机制。',
         '输出只使用以下分段：',
         '<!--PROBLEM_MD-->',
@@ -787,6 +801,7 @@ export async function generateSolution(workspaceId) {
       }
       const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
       algorithm = sanitizeMarkdownArtifact(algorithm);
+      assertAlgorithmReliabilityContract(problem, algorithm);
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
       const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
@@ -808,6 +823,7 @@ export async function regenerateStdSolution(workspaceId) {
       assertValidText(problem, '题目未生成，无法重生成标程');
       const existingAlgorithm = await safeRead(workspaceId, 'solution/algorithm.md');
       assertValidText(existingAlgorithm, '算法草案未生成，无法只重生成标程');
+      assertAlgorithmReliabilityContract(problem, existingAlgorithm);
       const meta = await getWorkspaceMetaInternal(workspaceId);
       const diffCtx = meta?.difficulty || {};
       const diffInfo = diffCtx.instruction
@@ -843,10 +859,12 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
   let lastFailure = '';
   const attempts = [];
   const startedAt = Date.now();
+  const reliability = assessAlgorithmReliability(problem, algorithm);
+  const strictGatesEnabled = shouldRunStrictVerification(reliability);
   await appendWorkspaceLog(
     workspaceId,
     'solution.log',
-    `[${stamp()}] verification config level=${SOLUTION_VERIFICATION_LEVEL} candidates=${SOLUTION_MAX_CANDIDATES} review_rounds=${SOLUTION_REVIEW_ROUNDS} budget_ms=${SOLUTION_TIME_BUDGET_MS}\n`
+    `[${stamp()}] verification config level=${SOLUTION_VERIFICATION_LEVEL} effective_strict=${strictGatesEnabled} candidates=${SOLUTION_MAX_CANDIDATES} review_rounds=${SOLUTION_REVIEW_ROUNDS} budget_ms=${SOLUTION_TIME_BUDGET_MS} reliability=${JSON.stringify(reliability)}\n`
   );
   for (let candidate = 1; candidate <= SOLUTION_MAX_CANDIDATES; candidate += 1) {
     try {
@@ -863,7 +881,11 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
             candidate
           });
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: rawCpp.slice(0, 320) });
-      const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt });
+      const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, {
+        startedAt,
+        reliability,
+        strictGatesEnabled
+      });
       assertSolutionBudget(startedAt, `before solution markdown for candidate ${candidate}`);
       await setSolutionProgress(workspaceId, '正在根据标程生成最终题解');
       const markdown = await generateFinalSolutionMarkdown(workspaceId, {
@@ -888,6 +910,7 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
         problem,
         diffInfo,
         algorithm,
+        reliability,
         attempts,
         acceptedCandidate: candidate,
         cpp: verified.cpp,
@@ -907,6 +930,7 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
           problem,
           diffInfo,
           algorithm,
+          reliability,
           attempts,
           acceptedCandidate: null,
           cpp: '',
@@ -962,7 +986,9 @@ async function generateAlgorithmPlan(workspaceId, problem, diffInfo) {
         '## 正确性要点',
         '## 复杂度目标',
         '## 高风险反例',
-        '要求：逐条处理题面中的所有限制；如果存在多解/构造/浮点等非唯一输出风险，必须明确指出。'
+        '要求：逐条处理题面中的所有限制；如果存在多解/构造/浮点等非唯一输出风险，必须明确指出。',
+        '复杂题必须写出算法契约：状态含义、转移/合并规则、不变量或单调性来源、复杂度推导、反例边界。允许树、动态查询、容量/能量、数据结构复合，但不能只写算法名称。',
+        '若路径/区间结构维护 DP 或贪心状态，必须说明片段信息和合并规则，并说明合并可结合/可组合；若依赖二分或 DFN 顺序，必须说明单调性或顺序性质。'
       ].join('\n')
     },
     {
@@ -986,6 +1012,7 @@ async function generateAlgorithmPlan(workspaceId, problem, diffInfo) {
     }
   });
   ensureAlgorithmPlanLooksReasonable(plan);
+  assertAlgorithmReliabilityContract(problem, plan);
   return plan;
 }
 
@@ -1045,7 +1072,7 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
   return finalText;
 }
 
-async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt } = {}) {
+async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, { startedAt, reliability, strictGatesEnabled = false } = {}) {
   let cpp = sanitizeCppCode(rawCpp);
   assertCppLooksReasonable(cpp);
   const gates = [];
@@ -1054,10 +1081,10 @@ async function validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, 
   gates.push('compile');
   if (startedAt) assertSolutionBudget(startedAt, `after compile candidate ${candidate}`);
   await setSolutionProgress(workspaceId, `正在审查标程候选 ${candidate}`);
-  cpp = await crossReviewStdCpp(workspaceId, cpp, problem);
+  cpp = await crossReviewStdCpp(workspaceId, cpp, problem, reliability);
   gates.push('llm-code-review');
   if (startedAt) assertSolutionBudget(startedAt, `after review candidate ${candidate}`);
-  if (SOLUTION_VERIFICATION_LEVEL === 'strict') {
+  if (strictGatesEnabled) {
     await setSolutionProgress(workspaceId, `正在双解法对拍候选 ${candidate}`);
     cpp = await verifyWithDualSolution(workspaceId, cpp, problem);
     gates.push('dual-solution-differential');
@@ -1128,7 +1155,7 @@ async function generateFinalSolutionMarkdown(workspaceId, { problem, algorithm, 
   return stripCppBlock(markdown);
 }
 
-function buildVerificationReport({ problem, diffInfo, algorithm, attempts, acceptedCandidate, cpp, modeLabel = 'full' }) {
+function buildVerificationReport({ problem, diffInfo, algorithm, reliability, attempts, acceptedCandidate, cpp, modeLabel = 'full' }) {
   const lines = [
     '# 标程验证报告',
     '',
@@ -1137,6 +1164,7 @@ function buildVerificationReport({ problem, diffInfo, algorithm, attempts, accep
     `- Generated at: ${stamp()}`,
     `- Accepted candidate: ${acceptedCandidate || 'none'}`,
     diffInfo ? `- ${diffInfo}` : '',
+    reliability ? `- Reliability level: ${reliability.level}${reliability.reasons?.length ? ` (${reliability.reasons.join('; ')})` : ''}` : '',
     '',
     '## 候选记录',
     ''
@@ -1578,7 +1606,9 @@ export const __testHooks = {
   reviewPassed,
   sanitizeMarkdownArtifact,
   detectProblemGuarantees,
-  assertDataArtifactsRespectProblemGuarantees
+  assertDataArtifactsRespectProblemGuarantees,
+  assessAlgorithmReliability,
+  assertAlgorithmReliabilityContract
 };
 
 async function executePythonGenerator(workspaceId, { genPy, stdCpp, validatorPy, problemType, checkerCpp }) {
@@ -2190,9 +2220,16 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
   return current;
 }
 
-async function crossReviewStdCpp(workspaceId, cpp, problem) {
+async function crossReviewStdCpp(workspaceId, cpp, problem, reliability = null) {
   let current = String(cpp || '');
   const reviews = [];
+  const reliabilityText = reliability
+    ? [
+        `可靠性评估: ${reliability.level}`,
+        reliability.reasons?.length ? `触发因素: ${reliability.reasons.join('；')}` : '',
+        reliability.missing?.length ? `算法契约缺口: ${reliability.missing.join('；')}` : ''
+      ].filter(Boolean).join('\n')
+    : '';
   for (let round = 1; round <= SOLUTION_REVIEW_ROUNDS; round += 1) {
     await setSolutionProgress(workspaceId, `算法审查 ${round}/${SOLUTION_REVIEW_ROUNDS}`);
     const prevReviewText = round > 1
@@ -2209,6 +2246,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
           + '4. 边界情况：数组越界、整数溢出、空队列/空容器访问、特殊值（如 -1, INF）处理\n'
           + '5. 复杂度：最坏情况下时间复杂度是否在题目数据范围内可接受？注意 O(N) 的修改操作在 Q 次询问下是否退化到 O(NQ)\n'
           + '6. 输入输出：读入格式是否与题面一致？变量类型是否匹配？\n'
+          + '7. 若可靠性评估显示题目含动态路径、容量/能量、数据结构维护 DP/贪心等复杂组合，必须检查代码是否真正实现了算法契约中的状态、合并、不变量或单调性；不能因出现 HLD/线段树/二分等名称就 PASS。\n'
           + '输出第一行只能是 PASS 或 FAIL，第二行开始列出具体问题（含代码行号和原因）。\n'
           + '⚠️ 多轮审查须知：如果之前轮次已报告过的问题，本轮代码中已修复则不应再次报告；如果修复不完整或引入了新问题，指出遗留/新问题即可。'
       },
@@ -2216,6 +2254,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
         role: 'user',
         content: [
           'CODE_REVIEW',
+          reliabilityText,
           '题目：',
           problem || '',
           prevReviewText ? ['', '历史审查记录（之前轮次已报告过的错误，本轮不再重复）：', prevReviewText].join('\n') : '',
@@ -3140,6 +3179,96 @@ function assertSolutionTextLooksReasonable(markdown, cpp) {
     error.statusCode = 422;
     throw error;
   }
+}
+
+function assessAlgorithmReliability(problem, algorithm = '') {
+  const problemText = String(problem || '');
+  const algorithmText = String(algorithm || '');
+  const combined = `${problemText}\n${algorithmText}`;
+  const hasTreePath = hasAny(combined, [
+    /树链剖分|重链|HLD|heavy-light/i,
+    /树上[^。\n]{0,30}(路径|链|询问|查询|修改|更新)/i,
+    /(路径|链)[^。\n]{0,30}(LCA|最近公共祖先|dfn|DFS序|树剖)/i
+  ]);
+  const hasDynamicOps = hasAny(combined, [
+    /动态|在线|修改|更新|操作|询问|查询/i,
+    /\bQ\b|q\s*[<=≤]|[1-9]\d{4,}\s*次/i
+  ]);
+  const hasCapacityResource = hasAny(combined, [
+    /容量|油量|燃料|汽油|加油|补给|能量|电量|耐久|背包容量/i,
+    /capacity|fuel|energy/i
+  ]);
+  const hasRangeDataStructure = hasAny(combined, [
+    /线段树|树状数组|Fenwick|BIT|ST表|倍增|RMQ|分块|平衡树|堆/i,
+    /segment\s*tree|binary\s*lifting/i
+  ]);
+  const hasOptimizationClaim = hasAny(combined, [
+    /优化|二分|单调队列|斜率优化|矩阵|转移矩阵|自动机|分治/i,
+    /DP|动态规划|贪心/i
+  ]);
+
+  const contract = {
+    state: hasAny(algorithmText, [/状态|state|dp\s*\[|f\s*\[|定义\s*f|每个节点保存|维护[^。\n]{0,40}(信息|状态)/i]),
+    transition: hasAny(algorithmText, [/转移|transition|递推|relax|更新\s*dp|方程|从[^。\n]{0,25}转移/i]),
+    invariant: hasAny(algorithmText, [/不变量|单调性|正确性|归纳|交换论证|割性质|最优子结构|为什么|保证/i]),
+    complexity: hasAny(algorithmText, [/复杂度|O\s*\(|Θ\s*\(|最坏/i]),
+    edgeCases: hasAny(algorithmText, [/反例|边界|特殊|无解|极端|高风险/i]),
+    composition: hasAny(algorithmText, [/合并|结合律|可结合|可组合|merge|combine|矩阵乘法|区间信息|片段信息|左右儿子|pushup/i])
+  };
+
+  const reasons = [];
+  if (hasTreePath) reasons.push('tree/path structure');
+  if (hasDynamicOps) reasons.push('dynamic operations');
+  if (hasCapacityResource) reasons.push('capacity/resource state');
+  if (hasRangeDataStructure) reasons.push('range/path data structure');
+  if (hasOptimizationClaim) reasons.push('optimized DP/greedy claim');
+
+  const compositeScore = [hasTreePath, hasDynamicOps, hasCapacityResource, hasRangeDataStructure, hasOptimizationClaim]
+    .filter(Boolean).length;
+  const missing = [];
+  for (const [key, ok] of Object.entries(contract)) {
+    if (!ok) missing.push(key);
+  }
+  const needsComposition = (hasTreePath || hasRangeDataStructure) && (hasDynamicOps || hasCapacityResource || /DP|动态规划|贪心/i.test(combined));
+  if (needsComposition && !contract.composition) {
+    missing.push('composition');
+  }
+  const uniqueMissing = [...new Set(missing)];
+  const highRisk = compositeScore >= 3 || (hasTreePath && hasDynamicOps && hasCapacityResource);
+  const mediumRisk = compositeScore >= 2;
+  return {
+    level: highRisk ? 'high' : mediumRisk ? 'medium' : 'normal',
+    reasons,
+    contract,
+    missing: uniqueMissing
+  };
+}
+
+function assertAlgorithmReliabilityContract(problem, algorithm = '') {
+  const assessment = assessAlgorithmReliability(problem, algorithm);
+  const required = assessment.level === 'high'
+    ? ['state', 'transition', 'invariant', 'complexity', 'edgeCases']
+    : assessment.level === 'medium'
+      ? ['state', 'transition', 'complexity']
+      : [];
+  if (assessment.level !== 'high' && !required.length) return assessment;
+  const missing = required.filter(key => !assessment.contract[key]);
+  const needsComposition = assessment.reasons.some(r => /tree\/path|range\/path/.test(r))
+    && assessment.reasons.some(r => /dynamic|capacity|optimized/.test(r));
+  if (needsComposition && !assessment.contract.composition) missing.push('composition');
+  const uniqueMissing = [...new Set(missing)];
+  if (!uniqueMissing.length) return assessment;
+  const error = new Error(`algorithm reliability contract incomplete for ${assessment.level}-risk design: missing ${uniqueMissing.join(', ')}`);
+  error.statusCode = 422;
+  throw error;
+}
+
+function shouldRunStrictVerification(reliability) {
+  return SOLUTION_VERIFICATION_LEVEL === 'strict' || reliability?.level === 'high';
+}
+
+function hasAny(text, patterns) {
+  return patterns.some(pattern => pattern.test(text));
 }
 
 function ensureAlgorithmPlanLooksReasonable(plan) {
