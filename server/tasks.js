@@ -1393,7 +1393,21 @@ function sanitizeCppCode(text) {
   if (includeIdx > 0) code = code.slice(includeIdx);
   const trailingFence = code.indexOf('\n```');
   if (trailingFence !== -1) code = code.slice(0, trailingFence);
+  code = keepLastCompleteCppProgram(code);
   return code.trim();
+}
+
+function keepLastCompleteCppProgram(code) {
+  const text = String(code || '');
+  const includeMatches = Array.from(text.matchAll(/#\s*include\b/g));
+  const mainMatches = Array.from(text.matchAll(/\b(?:int|signed)\s+main\s*\(/g));
+  if (includeMatches.length <= 1 || mainMatches.length <= 1) return text;
+  const lastInclude = includeMatches[includeMatches.length - 1].index;
+  const candidate = text.slice(lastInclude).trim();
+  if (/#\s*include\b/.test(candidate) && /\b(?:int|signed)\s+main\s*\(/.test(candidate)) {
+    return candidate;
+  }
+  return text;
 }
 
 function extractPythonCode(text) {
@@ -1668,6 +1682,7 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
           {
             role: 'system',
             content: '你是 C++ 标程修复助手。根据编译错误修正下方的 C++ 代码。标记为 COMPILE_FIX。只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。\n'
+              + '⚠️ 必须输出一份完整程序，不要把旧代码和新代码拼接在一起，不要出现重复的 struct、全局变量、函数或 main。\n'
               + '⚠️ 如果链接错误提示 undefined reference to `main`，必须在代码末尾补上完整的 int main() 或 signed main() 函数。',
           },
           {

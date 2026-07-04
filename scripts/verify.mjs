@@ -21,6 +21,10 @@ assert.equal(
   __testHooks.sanitizeCppCode('说明\n```c++\n#include <bits/stdc++.h>\nint main(){return 0;}\n```'),
   '#include <bits/stdc++.h>\nint main(){return 0;}'
 );
+assert.equal(
+  __testHooks.sanitizeCppCode('#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 1;}\n#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 0;}'),
+  '#include <bits/stdc++.h>\nstruct Edge{};\nint main(){return 0;}'
+);
 assert.equal(__testHooks.reviewPassed('PASS\nok'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nPASS\nok'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nFAIL\nbad'), false);
