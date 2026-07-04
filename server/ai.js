@@ -2,6 +2,8 @@ const hasRealLLM = Boolean(process.env.LLM_BASE_URL && process.env.LLM_API_KEY &
 const RATE_LIMIT_RETRY_BASE_MS = envInt('LLM_RATE_LIMIT_RETRY_BASE_MS', 60_000);
 const RATE_LIMIT_RETRY_MAX_MS = envInt('LLM_RATE_LIMIT_RETRY_MAX_MS', 180_000);
 const RATE_LIMIT_MAX_ATTEMPTS = Math.max(1, envInt('LLM_RATE_LIMIT_MAX_ATTEMPTS', 3));
+const RATE_LIMIT_COOLDOWN_MS = envInt('LLM_RATE_LIMIT_COOLDOWN_MS', 5 * 60_000);
+let rateLimitBlockedUntil = 0;
 
 const MOCK_CPP = `#include <bits/stdc++.h>
 using namespace std;
@@ -25,6 +27,7 @@ export async function callLLM(messages, options = {}) {
   if (!hasRealLLM) {
     return mockLLM(messages, options);
   }
+  throwIfRateLimitCoolingDown();
 
   const retries = Number.isInteger(options.retries) ? options.retries : 5;
   let lastError = null;
@@ -99,10 +102,11 @@ export async function callLLM(messages, options = {}) {
     }
   }
   if (isRateLimitError(lastError)) {
-    const error = new Error('AI 供应商当前限流，请稍后重试。系统已减少无效重试以避免长时间卡住。');
-    error.statusCode = 503;
-    error.cause = lastError;
-    throw error;
+    rateLimitBlockedUntil = Math.max(
+      rateLimitBlockedUntil,
+      Date.now() + Math.max(Number(lastError?.retryAfterMs || 0), RATE_LIMIT_COOLDOWN_MS)
+    );
+    throw buildRateLimitError(lastError);
   }
   throw lastError || new Error('LLM failed');
 }
@@ -320,6 +324,20 @@ function parseRetryAfterMs(value) {
   if (Number.isFinite(seconds) && seconds > 0) return Math.floor(seconds * 1000);
   const dateMs = Date.parse(value);
   return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : 0;
+}
+
+function throwIfRateLimitCoolingDown() {
+  if (Date.now() >= rateLimitBlockedUntil) return;
+  throw buildRateLimitError(null);
+}
+
+function buildRateLimitError(cause) {
+  const remainingMs = Math.max(0, rateLimitBlockedUntil - Date.now());
+  const suffix = remainingMs > 0 ? `预计 ${Math.ceil(remainingMs / 1000)} 秒后可重试。` : '请稍后重试。';
+  const error = new Error(`AI 供应商当前限流，${suffix}系统已减少无效重试以避免长时间卡住。`);
+  error.statusCode = 503;
+  if (cause) error.cause = cause;
+  return error;
 }
 
 function isRetryableLLMError(error) {
