@@ -227,13 +227,18 @@ export async function generateProblem(workspaceId, payload) {
           onComplete: async info => {
             await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
           },
-          onRetry: async ({ attempt, retries, error }) => {
+          onRetry: async ({ attempt, retries, error, waitMs }) => {
+            const waitSeconds = Math.ceil((waitMs || 0) / 1000);
+            const isRateLimited = /429|too many requests/i.test(error.message || '');
+            const message = isRateLimited
+              ? `供应商限流，等待 ${waitSeconds} 秒后重试 ${attempt + 1}/${retries}`
+              : `题目生成重试 ${attempt + 1}/${retries}`;
             emitWorkspaceEvent(workspaceId, 'task:update', {
               stage: 'problem',
               state: 'running',
-              message: `题目生成重试 ${attempt + 1}/${retries}`
+              message
             });
-            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries}: ${error.message}\n`);
+            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] retry ${attempt + 1}/${retries} after ${waitSeconds}s: ${error.message}\n`);
           }
         });
       } catch (error) {
@@ -255,8 +260,14 @@ export async function generateProblem(workspaceId, payload) {
           onComplete: async info => {
             await logLLMComplete(workspaceId, 'problem.log', 'compact joint design', info);
           },
-          onRetry: async ({ attempt, retries, error }) => {
-            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] compact joint retry ${attempt + 1}/${retries}: ${error.message}\n`);
+          onRetry: async ({ attempt, retries, error, waitMs }) => {
+            const waitSeconds = Math.ceil((waitMs || 0) / 1000);
+            emitWorkspaceEvent(workspaceId, 'task:update', {
+              stage: 'problem',
+              state: 'running',
+              message: `兼容模式限流，等待 ${waitSeconds} 秒后重试 ${attempt + 1}/${retries}`
+            });
+            await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] compact joint retry ${attempt + 1}/${retries} after ${waitSeconds}s: ${error.message}\n`);
           }
         });
       }

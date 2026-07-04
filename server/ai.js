@@ -1,4 +1,6 @@
 const hasRealLLM = Boolean(process.env.LLM_BASE_URL && process.env.LLM_API_KEY && process.env.LLM_MODEL_NAME);
+const RATE_LIMIT_RETRY_BASE_MS = envInt('LLM_RATE_LIMIT_RETRY_BASE_MS', 60_000);
+const RATE_LIMIT_RETRY_MAX_MS = envInt('LLM_RATE_LIMIT_RETRY_MAX_MS', 180_000);
 
 const MOCK_CPP = `#include <bits/stdc++.h>
 using namespace std;
@@ -46,9 +48,11 @@ export async function callLLM(messages, options = {}) {
         });
 
         if (!response.ok) {
+          const retryAfter = response.headers.get('retry-after');
           const body = await response.text();
           const error = new Error(`LLM request failed: ${response.status} ${body}`);
           error.statusCode = response.status;
+          error.retryAfterMs = parseRetryAfterMs(retryAfter);
           throw error;
         }
 
@@ -297,6 +301,19 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function envInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.floor(seconds * 1000);
+  const dateMs = Date.parse(value);
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : 0;
+}
+
 function isRetryableLLMError(error) {
   const status = Number(error?.statusCode || error?.status || 0);
   const message = String(error?.message || '').toLowerCase();
@@ -312,7 +329,10 @@ function isRetryableLLMError(error) {
 function retryWaitMs(error, attempt) {
   const message = String(error?.message || '').toLowerCase();
   if (message.includes('http error 429') || message.includes('too many requests')) {
-    return Math.min(10_000 * attempt, 30_000);
+    return Math.max(
+      Number(error?.retryAfterMs || 0),
+      Math.min(RATE_LIMIT_RETRY_BASE_MS * attempt, RATE_LIMIT_RETRY_MAX_MS)
+    );
   }
   return Math.min(1000 * attempt, 3000);
 }
