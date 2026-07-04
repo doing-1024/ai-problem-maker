@@ -139,6 +139,8 @@ export async function generateProblem(workspaceId, payload) {
             '算法范式改编策略：',
             '- 同难度改编（mode=same）：保持原题基础算法范式一致，只改背景、故事、题名、变量名，让选手无法通过关键词搜到原题。原题是 DP 就仍是 DP，图论就仍是图论。',
             '- 提升难度改编（mode=custom）：可以在同一算法谱系内升级（如简单DP→区间DP→树形DP→DP套DP）。必要时经审慎分析可升级到更高阶算法范式。注意只能升级不能降级——不要把 DP 改成 BFS/贪心/纯模拟，但可以把 BFS/贪心升级为 DP。',
+            '- 提升难度必须以“可写出清晰满分标程”为边界：不要为了贴近目标难度堆叠过多维状态、树/图嵌套、非线性损耗、自由排列、浮点和多阶段限制。若需要提升，只增加 1 个核心难点，并保持输入格式、状态定义和转移可以被 200 行以内 C++17 稳定实现。',
+            '- 对原题包含浮点/无解/最小费用等高风险细节时，改编题优先保持线性结构或小规模状态空间，避免同时引入树形遍历、任意顺序、复杂四舍五入和多种容量约束。',
             '',
             '输出必须是完整 Markdown 题面，结构固定为：',
             '# 标题',
@@ -170,13 +172,14 @@ export async function generateProblem(workspaceId, payload) {
         },
         {
           role: 'user',
-          content: [
-            'PROBLEM_REWRITE',
-            `难度模式: ${difficultyMode}`,
-            `难度说明: ${payload.difficultyText || ''}`,
-            `用户难度要求: ${difficultyInstruction}`,
-            `改编策略: ${adaptationInstruction}`,
-            `难度分级参考：`,
+    content: [
+      'PROBLEM_REWRITE',
+      `难度模式: ${difficultyMode}`,
+      `难度说明: ${payload.difficultyText || ''}`,
+      `用户难度要求: ${difficultyInstruction}`,
+      `改编策略: ${adaptationInstruction}`,
+      '工程可验证性要求: 题面必须能稳定生成、编译和验证满分 C++17 标程；不要把题目升级成需要大量自由遍历排列、多维复杂 DP 或超长代码的形式。',
+      `难度分级参考：`,
             DIFFICULTY_TAXONOMY,
             'SOURCE_TEXT:',
             source || ''
@@ -712,7 +715,7 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
   ];
   const user = [
     'STD_CPP_CANDIDATE',
-    `候选编号: ${candidate}/3`,
+    `候选编号: ${candidate}/${SOLUTION_MAX_CANDIDATES}`,
     diffInfo,
     '题面:',
     problem || '',
@@ -1831,9 +1834,10 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
         role: 'system',
         content: '你是 C++ 代码修复/重设计助手。根据审查意见处理代码。\n'
           + '判断审查类型：\n'
-          + '- 如果审查指出的是变量名错误、边界加减1、类型不匹配等小问题 → 在原代码上修补\n'
-          + '- 如果审查指出算法根本性错误（如忽略了核心约束、复杂度退化到不可接受、贪心策略缺乏正确性保证）→ **必须否定原算法框架，从零重新设计**，不做局部修补\n'
+          + '- 如果审查指出的是变量名错误、边界加减1、类型不匹配、某个转移漏处理等局部问题 → 在原代码上修补，优先保持原有框架\n'
+          + '- 只有审查明确指出算法根本性错误（如忽略核心约束、复杂度必然超限、核心贪心无反例证明）时，才从零重新设计\n'
           + '只输出修正/重设计后的纯 C++17 源码，不要 Markdown 代码块，不要解释。\n'
+          + '必须输出一份完整但尽量简洁的程序；避免超长模板、重复定义和未闭合括号。\n'
           + '审查意见中提到的反例场景必须正确解决，不可敷衍。\n'
           + '⚠️ 多轮修复须知：请结合本轮审查意见和历轮审查历史判断问题根因。如果同一问题在多轮中被反复指出，说明之前的修补方案无效，需要换一种根本性不同的解法。'
       },
@@ -1865,8 +1869,8 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
     try {
       await verifyCppCompiles(workspaceId, current);
     } catch (compileError) {
-      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, rejecting candidate: ${compileError.message.slice(0, 300)}\n`);
-      throw compileError;
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] fix ${round} broke compilation, trying compile repair: ${compileError.message.slice(0, 300)}\n`);
+      current = await repairCppCompilation(workspaceId, current, problem);
     }
   }
   const error = new Error(`code review did not reach PASS after ${SOLUTION_REVIEW_ROUNDS} rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
