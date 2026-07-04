@@ -612,6 +612,61 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
     );
     emitProblemPreview(workspaceId, content);
   }
+  const remaining = getProblemMarkdownIssues(content);
+  if (remaining.length) {
+    emitWorkspaceEvent(workspaceId, 'task:update', {
+      stage: 'problem',
+      state: 'running',
+      message: '正在强制重写完整题面'
+    });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] force rewrite incomplete problem: ${remaining.join(', ')}\n`);
+    content = await callLLM(
+      [
+        {
+          role: 'system',
+          content: [
+            '你是严格的 OI 题面重写助手。当前题面多轮补全后仍含占位或结构缺失，必须整篇重写为完整 Markdown 题面。',
+            `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+            '只输出完整题面，不要解释。',
+            '必须包含且只包含这些主章节：# 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。',
+            '样例必须包含输入和输出代码块，并保留 HTML 注释标记：<!--SAMPLE_INPUT-->, <!--SAMPLE_INPUT_END-->, <!--SAMPLE_OUTPUT-->, <!--SAMPLE_OUTPUT_END-->。',
+            '严禁出现任何省略或占位表达，包括 ...、……、待补、待续、略、同上、依此类推、等。',
+            '题面必须自洽，输入格式中的每个变量都要定义，数据范围中的每个变量都要给出限制。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: [
+            `用户难度要求: ${difficultyInstruction}`,
+            `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
+            `当前遗留问题: ${remaining.join('；')}`,
+            '原始题面:',
+            source || '',
+            '不完整题面:',
+            content || ''
+          ].join('\n')
+        }
+      ],
+      {
+        temperature: 0.08,
+        timeoutMs: 90000,
+        maxTokens: 8192,
+        retries: 5,
+        onComplete: async info => {
+          await logLLMComplete(workspaceId, 'problem.log', 'problem force rewrite', info);
+        },
+        onRetry: async ({ attempt, retries, error }) => {
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `完整题面重写重试 ${attempt + 1}/${retries}`
+          });
+          await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] force rewrite retry ${attempt + 1}/${retries}: ${error.message}\n`);
+        }
+      }
+    );
+    emitProblemPreview(workspaceId, content);
+  }
   return content;
 }
 
