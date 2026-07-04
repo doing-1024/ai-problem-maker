@@ -303,7 +303,7 @@ async function reviewAndReviseProblem(workspaceId, initialContent, source, diffi
       }
     );
     await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] review ${round}: ${critique.slice(0, 1200)}\n`);
-    if (/^\s*PASS\b/i.test(critique)) {
+    if (reviewPassed(critique)) {
       return content;
     }
 
@@ -1138,7 +1138,8 @@ export const __testHooks = {
   verifySampleWithStd,
   verifyWithBruteOracle,
   verifyFullScoreReview,
-  sanitizeCppCode
+  sanitizeCppCode,
+  reviewPassed
 };
 
 async function executePythonGenerator(workspaceId, { genPy, stdCpp, validatorPy, problemType, checkerCpp }) {
@@ -1426,6 +1427,15 @@ function parseJsonOrDefault(text, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function reviewPassed(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  const firstDecision = lines.find(line => /^(PASS|FAIL)\b/i.test(line));
+  return Boolean(firstDecision && /^PASS\b/i.test(firstDecision));
 }
 
 function assertValidText(text, message) {
@@ -1743,7 +1753,7 @@ async function crossReviewStdCpp(workspaceId, cpp, problem) {
     await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] review ${round}: ${review.slice(0, 500)}\n`);
     reviews.push(`Round ${round}:\n${review}`);
 
-    if (/^\s*PASS\b/i.test(review)) {
+    if (reviewPassed(review)) {
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] code review PASS in round ${round}\n`);
       return current;
     }
@@ -2271,7 +2281,7 @@ async function verifyFullScoreReview(workspaceId, markdown, cpp, problem, diffIn
     }
   });
   await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] full ac review: ${review.slice(0, 1000)}\n`);
-  if (!/^\s*PASS\b/i.test(review)) {
+  if (!reviewPassed(review)) {
     const error = new Error(`full AC review failed: ${review.slice(0, 800)}`);
     error.statusCode = 422;
     throw error;
