@@ -28,6 +28,8 @@ assert.equal(
 assert.equal(__testHooks.reviewPassed('PASS\nok'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nPASS\nok'), true);
 assert.equal(__testHooks.reviewPassed('CODE_REVIEW\nFAIL\nbad'), false);
+assert.equal(__testHooks.reviewPassed('标记为 CODE_REVIEW\n\n### 结论\n**PASS**'), true);
+assert.equal(__testHooks.reviewPassed('CODE_REVIEW\n\n结论：FAIL'), false);
 
 const workspace = await createWorkspace();
 assert.ok(workspace.workspaceId);

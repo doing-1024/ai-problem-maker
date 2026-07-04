@@ -1503,8 +1503,18 @@ function reviewPassed(text) {
     .split(/\r?\n/)
     .map(line => line.trim())
     .filter(Boolean);
-  const firstDecision = lines.find(line => /^(PASS|FAIL)\b/i.test(line));
-  return Boolean(firstDecision && /^PASS\b/i.test(firstDecision));
+  for (const line of lines) {
+    const conclusion = line.match(/^(?:#{1,6}\s*)?(?:结论|最终结论|verdict|result)\s*[:：]?\s*\*{0,2}(PASS|FAIL)\*{0,2}\b/i);
+    if (conclusion) return conclusion[1].toUpperCase() === 'PASS';
+    const normalized = line
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/^`{1,3}|`{1,3}$/g, '')
+      .replace(/^\*{1,2}|\*{1,2}$/g, '')
+      .trim();
+    const standalone = normalized.match(/^(PASS|FAIL)\b/i);
+    if (standalone) return standalone[1].toUpperCase() === 'PASS';
+  }
+  return false;
 }
 
 function assertValidText(text, message) {
