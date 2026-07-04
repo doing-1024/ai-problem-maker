@@ -226,6 +226,7 @@ export async function generateProblem(workspaceId, payload) {
           temperature: 0.3,
           maxTokens: 4096,
           retries: 5,
+          retryMethodErrors: JOINT_DESIGN_COMPACT_FIRST,
           onComplete: async info => {
             await logLLMComplete(workspaceId, 'problem.log', 'problem draft', info);
           },

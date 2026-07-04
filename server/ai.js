@@ -85,7 +85,7 @@ export async function callLLM(messages, options = {}) {
     } catch (error) {
       lastError = error;
       const maxAttempts = isRateLimitError(error) ? Math.min(retries, RATE_LIMIT_MAX_ATTEMPTS) : retries;
-      if (attempt < maxAttempts && isRetryableLLMError(error)) {
+      if (attempt < maxAttempts && isRetryableLLMError(error, options)) {
         if (typeof options.onRetry === 'function') {
           const waitMs = retryWaitMs(error, attempt);
           await options.onRetry({
@@ -389,10 +389,12 @@ function buildRateLimitError(cause) {
   return error;
 }
 
-function isRetryableLLMError(error) {
+function isRetryableLLMError(error, options = {}) {
   const status = Number(error?.statusCode || error?.status || 0);
   const message = String(error?.message || '').toLowerCase();
-  if (message.includes('http error 405') || message.includes('method not allowed')) return false;
+  if (message.includes('http error 405') || message.includes('method not allowed')) {
+    return options.retryMethodErrors !== false;
+  }
   if (status >= 500 || status === 429) return true;
   if (error?.retryable) return true;
   if (message.includes('fetch failed')) return true;
