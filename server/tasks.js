@@ -1224,7 +1224,12 @@ async function redesignJointArtifactsAfterSolutionFailure(workspaceId, { problem
   newProblem = await completeProblemMarkdown(workspaceId, newProblem, problem, difficultyInstruction, difficultyMode);
   ensureProblemMarkdownStructure(newProblem);
   let newAlgorithm = sanitizeMarkdownArtifact(design.algorithm);
-  ensureAlgorithmPlanLooksReasonable(newAlgorithm);
+  try {
+    ensureAlgorithmPlanLooksReasonable(newAlgorithm);
+  } catch (error) {
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] redesigned algorithm shape invalid, regenerating plan: ${error.message}\n`);
+    newAlgorithm = await generateAlgorithmPlan(workspaceId, newProblem, diffInfo);
+  }
   newAlgorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
     problem: newProblem,
     algorithm: newAlgorithm,
@@ -1233,8 +1238,13 @@ async function redesignJointArtifactsAfterSolutionFailure(workspaceId, { problem
     logName: 'solution.log',
     label: 'redesigned algorithm'
   });
-  const newCpp = sanitizeCppCode(design.cpp);
-  assertCppLooksReasonable(newCpp);
+  let newCpp = sanitizeCppCode(design.cpp);
+  try {
+    assertCppLooksReasonable(newCpp);
+  } catch (error) {
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] redesigned std seed ignored: ${error.message}\n`);
+    newCpp = '';
+  }
   emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: newProblem.slice(0, 1200) });
   emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: newAlgorithm.slice(0, 320) });
   emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: newCpp.slice(0, 320) });
