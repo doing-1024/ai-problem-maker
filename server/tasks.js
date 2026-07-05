@@ -1716,7 +1716,11 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
     '标程必须是可独立编译的完整程序，必须包含 int main() 或 signed main() 入口。',
     '标程必须是满分 AC 解法；不要输出部分分、暴力、伪代码或未经证明的贪心。',
     '读入格式必须严格匹配题面。不得忽略任何输入参数、约束或特殊情况。',
+    '题面是唯一权威。算法草案只是候选思路；如果算法草案与题面或上一轮失败反馈冲突，必须推翻算法草案并从题面重新推导。',
     '如果上一候选失败，必须从失败根因出发重新设计，不要只做局部补丁。',
+    '如果失败反馈点名某个代码模式、递推式、贪心规则或数据结构维护方式错误，新候选严禁继续使用同一模式；必须换成可证明覆盖所有源状态/边界的实现。',
+    '对 DP 转移尤其要从“上一层所有合法源状态 + 本步合法决策集合”推导，不能用看似类似完全背包/前缀递推的写法替代，除非能覆盖每个源状态并保持不变量。',
+    '若题面存在“至少/不少于/门槛/容量/补给/购买”等限制，购买或补给转移必须显式枚举或等价优化所有 source state 与 purchase amount；不要只从当前层 h[v-1] 递推而漏掉 f[*] 源状态。',
     '',
     '⚠️ 常见错误自查：',
     '- 容量/距离限制是否在代码中有显式的 if/边界判断？',
@@ -1739,7 +1743,8 @@ async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffIn
     user.push(
       'PREVIOUS_CANDIDATE_FAILURE:',
       lastFailure,
-      '请根据上述失败原因重新设计题解和标程。若失败原因涉及算法复杂度或核心正确性，不要沿用原算法框架。'
+      '请根据上述失败原因重新设计题解和标程。若失败原因涉及算法复杂度、DP 转移、贪心正确性、漏解、反例或核心约束，不要沿用原算法框架。',
+      '上一失败报告中被点名的错误代码模式必须从新代码中消失；新代码应优先使用更直接、更可证明的状态转移，即使常数稍大。'
     );
   }
   const finalText = await callLLM([
@@ -3168,16 +3173,19 @@ async function crossReviewStdCpp(workspaceId, cpp, problem, reliability = null) 
     const fixHistoryText = round > 1
       ? reviews.map((r, i) => `第${i + 1}轮审查意见：${r.slice(0, 400)}`).join('\n\n')
       : '';
+    const rootCauseReview = isCoreAlgorithmReviewFailure(review, reviews);
     const fixPrompt = [
       {
         role: 'system',
         content: '你是 C++ 代码修复/重设计助手。根据审查意见处理代码。\n'
           + '判断审查类型：\n'
           + '- 如果审查指出的是变量名错误、边界加减1、类型不匹配、某个转移漏处理等局部问题 → 在原代码上修补，优先保持原有框架\n'
-          + '- 只有审查明确指出算法根本性错误（如忽略核心约束、复杂度必然超限、核心贪心无反例证明）时，才从零重新设计\n'
+          + '- 如果审查明确指出算法根本性错误（如忽略核心约束、复杂度必然超限、DP 转移漏解、核心贪心无反例证明、数据结构合并不成立），必须从零重新设计，不要在原代码上打补丁\n'
+          + (rootCauseReview ? '当前审查属于核心算法正确性失败：必须丢弃当前代码框架，从题面一手推导新算法并输出全新完整程序。\n' : '')
           + '只输出修正/重设计后的纯 C++17 源码，不要 Markdown 代码块，不要解释。\n'
           + '必须输出一份完整但尽量简洁的程序；避免超长模板、重复定义和未闭合括号。\n'
           + '审查意见中提到的反例场景必须正确解决，不可敷衍。\n'
+          + '如果审查点名某个递推式/代码行/贪心规则错误，新代码不得继续出现同一错误模式；DP 必须从上一层合法源状态和本步合法决策集合推导，必要时使用枚举、前缀最值、最短路或其它等价优化来保证不漏状态。\n'
           + '⚠️ 多轮修复须知：请结合本轮审查意见和历轮审查历史判断问题根因。如果同一问题在多轮中被反复指出，说明之前的修补方案无效，需要换一种根本性不同的解法。'
       },
       {
@@ -3215,6 +3223,12 @@ async function crossReviewStdCpp(workspaceId, cpp, problem, reliability = null) 
   const error = new Error(`code review did not reach PASS after ${SOLUTION_REVIEW_ROUNDS} rounds\n${reviews.join('\n\n').slice(0, 3500)}`);
   error.statusCode = 422;
   throw error;
+}
+
+function isCoreAlgorithmReviewFailure(review, allReviews = []) {
+  const text = `${review || ''}\n${(allReviews || []).join('\n')}`;
+  if (!/FAIL/i.test(text)) return false;
+  return /核心|根本|严重|反例|漏解|错误|不正确|复杂度.*超|必然超限|DP|动态规划|转移|递推|贪心|单调性|不变量|合并|结合律|数据结构|完全背包|状态/.test(text);
 }
 
 async function verifyWithDualSolution(workspaceId, stdCpp, problem) {
