@@ -474,12 +474,12 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
       {
         role: 'system',
         content: [
-          '你是一个连续工作的 OI 出题 agent，需要在一次设计里同时交付题面、满分算法合同和 C++17 标程。',
+          '你是一个连续工作的 OI 出题 agent，需要在一次设计里同时交付题面、满分算法合同和 C++17 标程种子。',
           '允许使用任意题型、模型和算法范式；不要为了可靠性牺牲题目多样性，也不要用题型黑名单回避复杂问题。',
           '可靠性的来源是明确合同和可执行验证：题面每个限制必须能在算法合同和 std.cpp 中找到对应处理。',
           `难度分级参考：${DIFFICULTY_TAXONOMY}`,
           '算法合同必须具体到：状态/数据结构含义、转移或合并规则、关键不变量或单调性、复杂度、最容易出错的反例边界。',
-          '题面必须自洽、可判题，样例输出允许先写占位，后续会由通过验证的 std.cpp 重算。',
+          '题面必须自洽、可判题，样例输出允许先写占位，后续会由通过验证的 std.cpp 重算。整体输出要紧凑，题面不超过 1600 字，算法合同不超过 900 字，std.cpp 尽量不超过 220 行。',
           '输出只使用以下分段，不要添加分段外正文：',
           '<!--PROBLEM_MD-->',
           '# 标题',
@@ -519,7 +519,7 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     ], {
       temperature: 0.25,
       timeoutMs: 120000,
-      maxTokens: 14000,
+      maxTokens: 8192,
       retries: 5,
       onComplete: async info => {
         await logLLMComplete(workspaceId, 'problem.log', 'simple joint contract', info);
@@ -540,7 +540,20 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     let algorithm = sanitizeMarkdownArtifact(bundle.algorithm);
     let cpp = sanitizeCppCode(bundle.cpp);
     ensureProblemMarkdownStructure(problem);
+    if (!algorithm.trim()) {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design missing algorithm segment; generating contract from final problem\n`);
+      algorithm = await generateContractAlgorithmFromProblem(workspaceId, {
+        problem,
+        difficultyInstruction,
+        difficultyMode,
+        source
+      });
+    }
     ensureAlgorithmPlanLooksReasonable(algorithm);
+    if (!cpp.trim()) {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design missing std seed; generating seed from problem and algorithm\n`);
+      cpp = await generateStdSeedFromContract(workspaceId, { problem, algorithm });
+    }
     assertCppLooksReasonable(cpp);
 
     problem = removeInternalSampleMarkers(problem);
@@ -573,6 +586,92 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] failed: ${error.message}\n`);
     throw error;
   }
+}
+
+async function generateContractAlgorithmFromProblem(workspaceId, { problem, difficultyInstruction = '', difficultyMode = '', source = '' }) {
+  const algorithm = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是同一个 OI 出题 agent 的算法合同补全步骤。题面已经确定，现在只补全满分算法合同，不改题面。',
+        '允许任意题型和算法范式；不要降低题目多样性。目标是把题面约束转成可审查、可实现、可验证的算法合同。',
+        '输出 Markdown，必须包含且只包含这些主章节：',
+        '# 算法草案',
+        '## 题目重述',
+        '## 约束提取',
+        '## 算法选择',
+        '## 正确性要点',
+        '## 复杂度目标',
+        '## 高风险反例',
+        '算法选择必须写清状态/数据结构含义、转移或合并规则；正确性要点必须写关键不变量、单调性或归纳理由。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'CONTRACT_ALGORITHM_FROM_PROBLEM',
+        `难度模式: ${difficultyMode}`,
+        `目标难度: ${difficultyInstruction}`,
+        '',
+        '原题素材:',
+        source || '',
+        '',
+        '最终题面:',
+        problem || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.12,
+    timeoutMs: 90000,
+    maxTokens: 4096,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', 'contract algorithm fallback', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] contract algorithm retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  const cleaned = sanitizeMarkdownArtifact(algorithm);
+  ensureAlgorithmPlanLooksReasonable(cleaned);
+  return cleaned;
+}
+
+async function generateStdSeedFromContract(workspaceId, { problem, algorithm }) {
+  const cppText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是同一个 OI 出题 agent 的 C++ 标程种子补全步骤。只基于最终题面和算法合同写 C++17 满分标程。',
+        '只输出纯 C++17 源码，不要 Markdown 代码块，不要解释。必须包含 main，输入输出严格匹配题面。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'CONTRACT_STD_SEED',
+        '最终题面:',
+        problem || '',
+        '',
+        '算法合同:',
+        algorithm || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.1,
+    timeoutMs: 90000,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', 'contract std seed fallback', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] contract std seed retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  const cpp = sanitizeCppCode(cppText);
+  assertCppLooksReasonable(cpp);
+  return cpp;
 }
 
 async function reviewAndReviseProblem(workspaceId, initialContent, source, difficultyInstruction, difficultyMode) {
