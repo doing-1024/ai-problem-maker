@@ -63,12 +63,18 @@ const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'st
 const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2));
 const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 3));
 const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 10 * 60 * 1000));
+const SOLUTION_REDESIGN_ROUNDS = Math.max(0, envIntAllowZero('SOLUTION_REDESIGN_ROUNDS', 2));
 const PROVIDER_METHOD_FALLBACK_COOLDOWN_MS = envInt('PROVIDER_METHOD_FALLBACK_COOLDOWN_MS', 60_000);
 const JOINT_DESIGN_COMPACT_FIRST = envBool('JOINT_DESIGN_COMPACT_FIRST', true);
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+
+function envIntAllowZero(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 function envChoice(name, fallback, choices) {
@@ -965,12 +971,20 @@ export async function generateSolution(workspaceId) {
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
       let result;
-      try {
-        result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
-      } catch (qualityError) {
-        if (!isDesignRedesignableSolutionFailure(qualityError)) throw qualityError;
-        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] solution gates failed; redesigning joint problem/algorithm from failure feedback\n`);
-        await setSolutionProgress(workspaceId, '标程质量门失败，正在回滚重写题面与算法');
+      for (let redesignRound = 0; redesignRound <= SOLUTION_REDESIGN_ROUNDS; redesignRound += 1) {
+        try {
+          result = await buildVerifiedSolutionArtifacts(workspaceId, {
+            problem,
+            algorithm,
+            diffInfo,
+            seedCpp,
+            modeLabel: redesignRound ? `redesigned-after-quality-failure-${redesignRound}` : 'full'
+          });
+          break;
+        } catch (qualityError) {
+          if (!isDesignRedesignableSolutionFailure(qualityError) || redesignRound >= SOLUTION_REDESIGN_ROUNDS) throw qualityError;
+          await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] solution gates failed; redesigning joint problem/algorithm from failure feedback round ${redesignRound + 1}/${SOLUTION_REDESIGN_ROUNDS}\n`);
+          await setSolutionProgress(workspaceId, `标程质量门失败，正在回滚重写题面与算法 ${redesignRound + 1}/${SOLUTION_REDESIGN_ROUNDS}`);
         const redesigned = await redesignJointArtifactsAfterSolutionFailure(workspaceId, {
           problem,
           algorithm,
@@ -979,27 +993,21 @@ export async function generateSolution(workspaceId) {
           difficultyMode: diffCtx.mode || '',
           failure: qualityError.message || ''
         });
-        problem = redesigned.problem;
-        algorithm = redesigned.algorithm;
-        seedCpp = redesigned.cpp;
-        fingerprint = solutionFingerprint(problem);
-        await writeWorkspaceFile(workspaceId, 'problem/problem.md', problem);
-        await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
-        if (seedCpp) {
-          await writeWorkspaceFile(workspaceId, 'solution/std.cpp', seedCpp);
+          problem = redesigned.problem;
+          algorithm = redesigned.algorithm;
+          seedCpp = redesigned.cpp;
+          fingerprint = solutionFingerprint(problem);
+          await writeWorkspaceFile(workspaceId, 'problem/problem.md', problem);
+          await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
+          if (seedCpp) {
+            await writeWorkspaceFile(workspaceId, 'solution/std.cpp', seedCpp);
+          }
+          await saveJobResult(workspaceId, 'problem', hashText(JSON.stringify({
+            version: PROBLEM_PIPELINE_VERSION,
+            source: problem,
+            redesign: `after-solution-quality-failure-${redesignRound + 1}`
+          })), { resultPath: 'problem/problem.md' });
         }
-        await saveJobResult(workspaceId, 'problem', hashText(JSON.stringify({
-          version: PROBLEM_PIPELINE_VERSION,
-          source: problem,
-          redesign: 'after-solution-quality-failure'
-        })), { resultPath: 'problem/problem.md' });
-        result = await buildVerifiedSolutionArtifacts(workspaceId, {
-          problem,
-          algorithm,
-          diffInfo,
-          seedCpp,
-          modeLabel: 'redesigned-after-quality-failure'
-        });
       }
       await persistSolutionArtifacts(workspaceId, fingerprint, result);
       return { ...result, cached: false };
@@ -2952,7 +2960,14 @@ async function verifyWithBruteOracle(workspaceId, stdCpp, problem) {
       for (const d of disagreements) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] oracle disagree case ${d.index}: std=${d.stdOut.slice(0, 300)} oracle=${d.oracleOut.slice(0, 300)}\n`);
       }
-      const error = new Error(`brute oracle verification failed with ${disagreements.length} disagreement(s)`);
+      const detail = disagreements.map(d => [
+        `case ${d.index}:`,
+        'input:',
+        d.input.slice(0, 1200),
+        `std: ${d.stdOut.slice(0, 300)}`,
+        `oracle: ${d.oracleOut.slice(0, 300)}`
+      ].join('\n')).join('\n\n');
+      const error = new Error(`brute oracle verification failed with ${disagreements.length} disagreement(s)\n${detail}`);
       error.statusCode = 422;
       throw error;
     }
@@ -3067,7 +3082,14 @@ async function verifyWithCounterexampleSearch(workspaceId, stdCpp, problem) {
       for (const d of disagreements) {
         await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] counterexample ${d.index}: std=${d.stdOut.slice(0, 300)} oracle=${d.oracleOut.slice(0, 300)} input=${d.input.slice(0, 500)}\n`);
       }
-      const error = new Error(`counterexample verification failed with ${disagreements.length} disagreement(s)`);
+      const detail = disagreements.map(d => [
+        `case ${d.index}:`,
+        'input:',
+        d.input.slice(0, 1200),
+        `std: ${d.stdOut.slice(0, 300)}`,
+        `oracle: ${d.oracleOut.slice(0, 300)}`
+      ].join('\n')).join('\n\n');
+      const error = new Error(`counterexample verification failed with ${disagreements.length} disagreement(s)\n${detail}`);
       error.statusCode = 422;
       throw error;
     }
