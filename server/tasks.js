@@ -915,12 +915,13 @@ async function logLLMComplete(workspaceId, logName, label, info) {
 export async function generateSolution(workspaceId) {
   return withWorkspaceLock(workspaceId, 'solution', async () => {
     try {
-      const problem = await safeRead(workspaceId, 'problem/problem.md');
+      let problem = await safeRead(workspaceId, 'problem/problem.md');
       assertValidText(problem, '题目未生成，无法生成题解');
-      const fingerprint = hashText(JSON.stringify({
+      const solutionFingerprint = currentProblem => hashText(JSON.stringify({
         version: SOLUTION_PIPELINE_VERSION,
-        problem
+        problem: currentProblem
       }));
+      let fingerprint = solutionFingerprint(problem);
       const meta = await getWorkspaceMetaInternal(workspaceId);
       if (
         meta?.jobs?.solution?.fingerprint === fingerprint &&
@@ -951,7 +952,7 @@ export async function generateSolution(workspaceId) {
         await setSolutionProgress(workspaceId, '正在生成算法草案');
         algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
       }
-      const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
+      let seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
       algorithm = sanitizeMarkdownArtifact(algorithm);
       algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
         problem,
@@ -963,7 +964,43 @@ export async function generateSolution(workspaceId) {
       });
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
       emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
-      const result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
+      let result;
+      try {
+        result = await buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp });
+      } catch (qualityError) {
+        if (!isDesignRedesignableSolutionFailure(qualityError)) throw qualityError;
+        await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] solution gates failed; redesigning joint problem/algorithm from failure feedback\n`);
+        await setSolutionProgress(workspaceId, '标程质量门失败，正在回滚重写题面与算法');
+        const redesigned = await redesignJointArtifactsAfterSolutionFailure(workspaceId, {
+          problem,
+          algorithm,
+          diffInfo,
+          difficultyInstruction: diffCtx.instruction || '',
+          difficultyMode: diffCtx.mode || '',
+          failure: qualityError.message || ''
+        });
+        problem = redesigned.problem;
+        algorithm = redesigned.algorithm;
+        seedCpp = redesigned.cpp;
+        fingerprint = solutionFingerprint(problem);
+        await writeWorkspaceFile(workspaceId, 'problem/problem.md', problem);
+        await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
+        if (seedCpp) {
+          await writeWorkspaceFile(workspaceId, 'solution/std.cpp', seedCpp);
+        }
+        await saveJobResult(workspaceId, 'problem', hashText(JSON.stringify({
+          version: PROBLEM_PIPELINE_VERSION,
+          source: problem,
+          redesign: 'after-solution-quality-failure'
+        })), { resultPath: 'problem/problem.md' });
+        result = await buildVerifiedSolutionArtifacts(workspaceId, {
+          problem,
+          algorithm,
+          diffInfo,
+          seedCpp,
+          modeLabel: 'redesigned-after-quality-failure'
+        });
+      }
       await persistSolutionArtifacts(workspaceId, fingerprint, result);
       return { ...result, cached: false };
     } catch (error) {
@@ -1112,6 +1149,88 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
     }
   }
   throw new Error('unreachable solution generation state');
+}
+
+function isDesignRedesignableSolutionFailure(error) {
+  const message = String(error?.message || '');
+  const status = Number(error?.statusCode || 0);
+  return status === 422 && /solution quality gates failed|code review did not reach PASS|full AC review failed|brute oracle verification failed|counterexample verification failed|dual solution verification/i.test(message);
+}
+
+async function redesignJointArtifactsAfterSolutionFailure(workspaceId, { problem, algorithm, diffInfo, difficultyInstruction = '', difficultyMode = '', failure = '' }) {
+  const redesignText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是同一个 OI 联合设计 agent。当前题面、算法草案或 std.cpp 已被质量门证明不一致或不可作为满分正解。',
+        '你的任务不是按题型避让，而是基于具体失败原因重新对齐题面、算法草案和 C++17 标程种子。',
+        `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+        '必须保持用户目标难度；允许保留原模型，也允许调整题面机制，但最终必须能写出可审查、可实现、与题面完全一致的满分标程。',
+        '失败报告中指出的复杂度、边界、数学推导、输入输出、无解判定或证明缺口，必须在新设计中逐条消除。',
+        '算法草案必须写出状态/转移或合并规则、不变量/单调性来源、复杂度和高风险反例。',
+        '输出只使用以下分段：',
+        '<!--PROBLEM_MD-->',
+        '完整 Markdown 题面',
+        '<!--PROBLEM_MD_END-->',
+        '<!--ALGORITHM_MD-->',
+        '完整算法草案 Markdown',
+        '<!--ALGORITHM_MD_END-->',
+        '<!--STD_CPP-->',
+        '完整 C++17 标程',
+        '<!--STD_CPP_END-->',
+        '题面必须包含 # 标题、## 题意、## 输入格式、## 输出格式、## 样例、## 数据范围与提示。样例代码块必须保留 SAMPLE_INPUT/SAMPLE_OUTPUT HTML 标记。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'JOINT_REDESIGN_AFTER_SOLUTION_FAILURE',
+        diffInfo,
+        `难度模式: ${difficultyMode}`,
+        `难度要求: ${difficultyInstruction}`,
+        '',
+        '失败报告:',
+        String(failure || '').slice(0, 6000),
+        '',
+        '上一版题面:',
+        problem || '',
+        '',
+        '上一版算法草案:',
+        algorithm || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.18,
+    timeoutMs: 120000,
+    maxTokens: 12000,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', 'joint redesign after failure', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] joint redesign retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  const design = parseJointDesignBundle(redesignText);
+  let newProblem = sanitizeMarkdownArtifact(design.problem);
+  newProblem = await completeProblemMarkdown(workspaceId, newProblem, problem, difficultyInstruction, difficultyMode);
+  ensureProblemMarkdownStructure(newProblem);
+  let newAlgorithm = sanitizeMarkdownArtifact(design.algorithm);
+  ensureAlgorithmPlanLooksReasonable(newAlgorithm);
+  newAlgorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+    problem: newProblem,
+    algorithm: newAlgorithm,
+    difficultyInstruction,
+    difficultyMode,
+    logName: 'solution.log',
+    label: 'redesigned algorithm'
+  });
+  const newCpp = sanitizeCppCode(design.cpp);
+  assertCppLooksReasonable(newCpp);
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: newProblem.slice(0, 1200) });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: newAlgorithm.slice(0, 320) });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: newCpp.slice(0, 320) });
+  return { problem: newProblem, algorithm: newAlgorithm, cpp: newCpp };
 }
 
 function assertSolutionBudget(startedAt, phase) {
