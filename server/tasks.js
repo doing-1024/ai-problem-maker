@@ -1317,8 +1317,14 @@ async function generateAlgorithmPlan(workspaceId, problem, diffInfo) {
     }
   });
   ensureAlgorithmPlanLooksReasonable(plan);
-  assertAlgorithmReliabilityContract(problem, plan);
-  return plan;
+  return ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+    problem,
+    algorithm: plan,
+    difficultyInstruction: diffInfo,
+    difficultyMode: '',
+    logName: 'solution.log',
+    label: 'generated algorithm'
+  });
 }
 
 async function generateStdCppCandidate(workspaceId, { problem, algorithm, diffInfo, lastFailure, candidate }) {
