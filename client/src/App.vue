@@ -191,6 +191,8 @@ let eventSource = null;
 let monacoEditor = null;
 let monacoChangeSubscription = null;
 let settingEditorValue = false;
+let refreshTimer = null;
+let refreshInFlight = false;
 
 const writableFiles = new Set([
   'input/problem_raw.md',
@@ -317,15 +319,42 @@ async function loadWorkspace() {
   if (!workspaceId.value || !workspaceToken.value) return;
   const meta = await api(`/api/workspaces/${workspaceId.value}`);
   status.value = meta.status || status.value;
-  const fileResp = await api(`/api/workspaces/${workspaceId.value}/files`);
-  files.value = fileResp.files || [];
-  await loadProblemRaw();
-  await loadLogs();
+  await refreshWorkspaceFiles({ includeLogs: true });
 }
 
 async function refreshAll() {
   clearMessages();
   await loadWorkspace();
+}
+
+async function refreshWorkspaceFiles({ includeLogs = false, reloadSelected = false } = {}) {
+  if (!workspaceId.value || !workspaceToken.value || refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const fileResp = await api(`/api/workspaces/${workspaceId.value}/files`);
+    files.value = fileResp.files || [];
+    await loadProblemRaw();
+    if (reloadSelected && selectedFile.value && files.value.includes(selectedFile.value) && !isDirty.value) {
+      const text = await readFile(selectedFile.value);
+      selectedContent.value = text;
+      editorContent.value = text;
+      livePreview.value = false;
+    }
+    if (includeLogs) await loadLogs();
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
+function scheduleWorkspaceRefresh(delayMs = 0, options = {}) {
+  if (!workspaceId.value || !workspaceToken.value) return;
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    refreshWorkspaceFiles(options).catch(error => {
+      errorMessage.value = error.message;
+    });
+  }, delayMs);
 }
 
 async function loadProblemRaw() {
@@ -660,6 +689,9 @@ function connectLiveFeed() {
         message: data.message || status.value[data.stage].message || ''
       };
     }
+    if (data.state === 'done' || data.state === 'error') {
+      scheduleWorkspaceRefresh(0, { includeLogs: true, reloadSelected: data.state === 'done' });
+    }
   });
   eventSource.addEventListener('task:partial', ev => {
     const data = JSON.parse(ev.data);
@@ -669,6 +701,7 @@ function connectLiveFeed() {
     selectedContent.value = text ? `${text}\n\n[实时预览 ${text.length} 字，完整文件以最终生成结果为准]` : '';
     editorContent.value = selectedContent.value;
     livePreview.value = true;
+    scheduleWorkspaceRefresh(1500);
   });
   eventSource.onerror = () => {
     activeJobMessage.value = '事件流重连中';
@@ -696,6 +729,7 @@ watch([selectedFile, canEditSelected, livePreview, editorIsText], () => {
 });
 
 onBeforeUnmount(() => {
+  if (refreshTimer) clearTimeout(refreshTimer);
   if (eventSource) eventSource.close();
   monacoChangeSubscription?.dispose();
   monacoEditor?.dispose();
