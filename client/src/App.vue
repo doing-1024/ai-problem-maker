@@ -698,7 +698,7 @@ function connectLiveFeed() {
     const text = data.text || '';
     liveEvent.value = data;
     selectedFile.value = fileForEvent(data);
-    selectedContent.value = text ? `${text}\n\n[实时预览 ${text.length} 字，完整文件以最终生成结果为准]` : '';
+    selectedContent.value = text;
     editorContent.value = selectedContent.value;
     livePreview.value = true;
     scheduleWorkspaceRefresh(1500);
