@@ -113,6 +113,138 @@ export async function callLLM(messages, options = {}) {
 
 function mockLLM(messages, options = {}) {
   const joined = messages.map(item => `${item.role}: ${item.content}`).join('\n');
+  if (joined.includes('SIMPLE_JOINT_CONTRACT')) {
+    return `<!--PROBLEM_MD-->
+# 改编题目
+
+## 题意
+给定一个整数序列，求所有整数之和。
+
+## 输入格式
+第一行一个整数 n。
+第二行 n 个整数。
+
+## 输出格式
+输出一个整数，表示所有整数之和。
+
+## 样例
+
+<!--SAMPLE_INPUT-->
+\`\`\`
+3
+1 2 3
+\`\`\`
+<!--SAMPLE_INPUT_END-->
+<!--SAMPLE_OUTPUT-->
+\`\`\`
+6
+\`\`\`
+<!--SAMPLE_OUTPUT_END-->
+
+## 数据范围与提示
+保证 1 <= n <= 100000，所有整数的绝对值不超过 1000000000。
+<!--PROBLEM_MD_END-->
+<!--ALGORITHM_MD-->
+# 算法草案
+
+## 题目重述
+读入 n 个整数并输出它们的总和。
+
+## 约束提取
+n 最大为 100000，数值和可能超过 32 位整数。
+
+## 算法选择
+使用 long long 变量 ans 维护前缀和，顺序读入每个数 x 后执行 ans += x。
+
+## 正确性要点
+不变量：处理前 i 个数后，ans 等于这 i 个数的和。初始为 0，读入一个数后加到 ans 中，不变量保持。处理完 n 个数后 ans 即为全部数之和。
+
+## 复杂度目标
+时间复杂度 O(n)，空间复杂度 O(1)。
+
+## 高风险反例
+n=1、存在负数、正负抵消、总和超过 int。
+<!--ALGORITHM_MD_END-->
+<!--STD_CPP-->
+${MOCK_CPP}
+<!--STD_CPP_END-->`;
+  }
+
+  if (joined.includes('INDEPENDENT_ORACLE_BUNDLE')) {
+    return `<!--ORACLE_CPP-->
+${MOCK_CPP}
+<!--ORACLE_CPP_END-->
+<!--TEST_GEN_PY-->
+cases = [
+    "3\\n1 2 3",
+    "1\\n7",
+    "5\\n-1 0 1 2 3",
+    "4\\n10 20 30 40",
+    "2\\n-5 5",
+]
+for i in range(80):
+    if i:
+        print("===CASE===")
+    print(cases[i % len(cases)])
+<!--TEST_GEN_PY_END-->`;
+  }
+
+  if (joined.includes('DATA_BUNDLE')) {
+    return `<!--DATA_PLAN_MD-->
+# 数据方案
+
+## 点数分布
+- 20%: n=1 的最小规模和单个负数。
+- 30%: 小规模含正负抵消。
+- 30%: 普通随机。
+- 20%: 较大数值，覆盖 long long。
+<!--DATA_PLAN_MD_END-->
+<!--PROBLEM_TYPE_JSON-->
+{
+  "type": "standard",
+  "outputUniqueness": "unique",
+  "requiresChecker": false,
+  "reasons": ["本地 mock 默认生成唯一答案题。"]
+}
+<!--PROBLEM_TYPE_JSON_END-->
+<!--GEN_PY-->
+import pathlib
+
+cases = [
+    "3\\n1 2 3\\n",
+    "1\\n7\\n",
+    "5\\n-1 0 1 2 3\\n",
+]
+
+for i, case in enumerate(cases, 1):
+    with open(f"{i}.in", "w", encoding="utf-8") as f:
+        f.write(case)
+<!--GEN_PY_END-->
+<!--VALIDATOR_PY-->
+import sys
+
+data = sys.stdin.read().strip().split()
+if not data:
+    print("empty input", file=sys.stderr)
+    sys.exit(1)
+try:
+    n = int(data[0])
+    values = [int(x) for x in data[1:]]
+except Exception as exc:
+    print(f"non-integer token: {exc}", file=sys.stderr)
+    sys.exit(1)
+if n < 1:
+    print("n must be positive", file=sys.stderr)
+    sys.exit(1)
+if len(values) != n:
+    print(f"expected {n} values, got {len(values)}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+<!--VALIDATOR_PY_END-->
+<!--CHECKER_CPP-->
+<!--CHECKER_CPP_END-->`;
+  }
+
   if (joined.includes('PROBLEM_REVIEW')) {
     return 'PASS\n- 本地 mock 跳过难度与算法范式审校。';
   }

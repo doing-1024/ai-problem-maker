@@ -236,27 +236,27 @@ const pipeline = computed(() => [
   },
   {
     key: 'problem',
-    label: '联合设计',
+    label: '合同式联合设计',
     state: status.value.problem?.state || 'idle',
-    message: status.value.problem?.message || '同一上下文设计题面、算法判断和标程种子',
+    message: status.value.problem?.message || '一次生成题面、算法合同和 std.cpp',
     actionLabel: '设计',
     action: generateProblem,
     disabled: !workspaceId.value
   },
   {
     key: 'solution',
-    label: '题解转写/验标',
+    label: '验标后转写题解',
     state: status.value.solution?.state || 'idle',
-    message: status.value.solution?.message || '验证 std.cpp，并把思路讲成题解',
+    message: status.value.solution?.message || '先用可执行门验 std，再由通过的 std 写题解',
     actionLabel: '验标',
     action: generateSolution,
     disabled: !workspaceId.value || !files.value.includes('problem/problem.md')
   },
   {
     key: 'data',
-    label: '数据打包',
+    label: '数据合同与打包',
     state: files.value.includes('data/datas.zip') ? 'done' : status.value.data?.state || 'idle',
-    message: status.value.data?.message || '生成数据方案并运行 gen.py',
+    message: status.value.data?.message || '一次生成方案、gen.py、validator，再本地运行',
     actionLabel: files.value.includes('data/gen.py') ? '运行' : '生成',
     action: files.value.includes('data/gen.py') ? runData : generateDataPlan,
     disabled: !workspaceId.value || !files.value.includes('solution/solution.md')
@@ -266,12 +266,12 @@ const pipeline = computed(() => [
 const pipelineDone = computed(() => pipeline.value.filter(step => step.state === 'done').length);
 const qualityItems = computed(() => [
   { label: '题面已生成', pass: files.value.includes('problem/problem.md') },
-  { label: '联合算法草案已生成', pass: files.value.includes('solution/algorithm.md') },
-  { label: '联合标程种子已生成', pass: files.value.includes('solution/std.cpp') },
-  { label: '题解转写已生成', pass: files.value.includes('solution/solution.md') },
-  { label: '标程已通过验证流程', pass: files.value.includes('solution/std.cpp') && status.value.solution?.state === 'done' },
+  { label: '算法合同已生成', pass: files.value.includes('solution/algorithm.md') },
+  { label: '标程已生成', pass: files.value.includes('solution/std.cpp') },
+  { label: '题解已由通过验证的标程转写', pass: files.value.includes('solution/solution.md') },
+  { label: '标程已通过可执行验证门', pass: files.value.includes('solution/std.cpp') && status.value.solution?.state === 'done' },
   { label: '标程验证报告已生成', pass: files.value.includes('solution/verification.md') },
-  { label: '数据方案已生成', pass: files.value.includes('data/hack_plan.md') },
+  { label: '数据方案合同已生成', pass: files.value.includes('data/hack_plan.md') },
   { label: '数据生成器已生成', pass: files.value.includes('data/gen.py') },
   { label: '输入校验器已生成', pass: files.value.includes('data/validator.py') },
   { label: '题型判定已生成', pass: files.value.includes('data/problem_type.json') },

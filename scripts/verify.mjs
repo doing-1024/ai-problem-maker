@@ -125,6 +125,7 @@ assert.match(solution.markdown, /## 正确性/);
 assert.match(solution.markdown, /## 复杂度/);
 assert.match(solution.algorithm, /## 约束提取/);
 assert.match(solution.verification, /# 标程验证报告/);
+assert.match(solution.verification, /independent-oracle/);
 const solutionCached = await generateSolution(workspace.workspaceId);
 assert.equal(solutionCached.cached, true);
 const stdOnly = await regenerateStdSolution(workspace.workspaceId);

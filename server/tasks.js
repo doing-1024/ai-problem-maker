@@ -54,9 +54,9 @@ const FEW_SHOT_EXAMPLE = `
 ——从单一算法升级为分层图最短路（复合思维：最短路 + DP/拆点），思维链深度和复合程度都显著提升。
 `;
 
-const PROBLEM_PIPELINE_VERSION = 'problem-reliability-contract-v1';
-const SOLUTION_PIPELINE_VERSION = 'joint-design-contract-v1';
-const DATA_PIPELINE_VERSION = 'data-reliability-v1';
+const PROBLEM_PIPELINE_VERSION = 'contract-first-workflow-v1';
+const SOLUTION_PIPELINE_VERSION = 'verified-std-workflow-v1';
+const DATA_PIPELINE_VERSION = 'data-bundle-workflow-v1';
 const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
 const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'standard', ['fast', 'standard', 'strict']);
@@ -66,6 +66,7 @@ const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS
 const SOLUTION_REDESIGN_ROUNDS = Math.max(0, envIntAllowZero('SOLUTION_REDESIGN_ROUNDS', 2));
 const PROVIDER_METHOD_FALLBACK_COOLDOWN_MS = envInt('PROVIDER_METHOD_FALLBACK_COOLDOWN_MS', 60_000);
 const JOINT_DESIGN_COMPACT_FIRST = envBool('JOINT_DESIGN_COMPACT_FIRST', true);
+const INDEPENDENT_ORACLE_CASES = envInt('INDEPENDENT_ORACLE_CASES', 60);
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);
@@ -125,6 +126,7 @@ async function saveJobResult(workspaceId, stage, fingerprint, extra = {}) {
 
 export async function generateProblem(workspaceId, payload) {
   return withWorkspaceLock(workspaceId, 'problem', async () => {
+    return generateProblemContractFirst(workspaceId, payload);
     try {
       const source = payload.sourceText || (await safeRead(workspaceId, 'input/problem_raw.md'));
       assertValidText(source, '题面为空或过短');
@@ -442,6 +444,137 @@ export async function generateProblem(workspaceId, payload) {
   });
 }
 
+async function generateProblemContractFirst(workspaceId, payload = {}) {
+  try {
+    const source = payload.sourceText || (await safeRead(workspaceId, 'input/problem_raw.md'));
+    assertValidText(source, '题面为空或过短');
+    const difficultyMode = payload.difficultyMode || 'same';
+    const difficultyInstruction = buildDifficultyInstruction(difficultyMode, payload.difficultyText || '');
+    const fingerprint = hashText(JSON.stringify({
+      version: PROBLEM_PIPELINE_VERSION,
+      source,
+      difficultyMode,
+      difficultyText: payload.difficultyText || ''
+    }));
+    const meta = await getWorkspaceMetaInternal(workspaceId);
+    if (
+      meta?.jobs?.problem?.fingerprint === fingerprint &&
+      await exists(workspaceId, 'problem/problem.md') &&
+      await exists(workspaceId, 'solution/algorithm.md') &&
+      await exists(workspaceId, 'solution/std.cpp')
+    ) {
+      return { path: 'problem/problem.md', content: await readWorkspaceFile(workspaceId, 'problem/problem.md'), cached: true };
+    }
+
+    await setState(workspaceId, 'problem', 'running', '正在联合设计题面、算法与标程');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在联合设计题面、算法与标程' });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start contract-first workflow ${PROBLEM_PIPELINE_VERSION}\n`);
+
+    const designText = await callLLM([
+      {
+        role: 'system',
+        content: [
+          '你是一个连续工作的 OI 出题 agent，需要在一次设计里同时交付题面、满分算法合同和 C++17 标程。',
+          '允许使用任意题型、模型和算法范式；不要为了可靠性牺牲题目多样性，也不要用题型黑名单回避复杂问题。',
+          '可靠性的来源是明确合同和可执行验证：题面每个限制必须能在算法合同和 std.cpp 中找到对应处理。',
+          `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+          '算法合同必须具体到：状态/数据结构含义、转移或合并规则、关键不变量或单调性、复杂度、最容易出错的反例边界。',
+          '题面必须自洽、可判题，样例输出允许先写占位，后续会由通过验证的 std.cpp 重算。',
+          '输出只使用以下分段，不要添加分段外正文：',
+          '<!--PROBLEM_MD-->',
+          '# 标题',
+          '## 题意',
+          '## 输入格式',
+          '## 输出格式',
+          '## 样例',
+          '## 数据范围与提示',
+          '<!--PROBLEM_MD_END-->',
+          '<!--ALGORITHM_MD-->',
+          '# 算法草案',
+          '## 题目重述',
+          '## 约束提取',
+          '## 算法选择',
+          '## 正确性要点',
+          '## 复杂度目标',
+          '## 高风险反例',
+          '<!--ALGORITHM_MD_END-->',
+          '<!--STD_CPP-->',
+          '完整 C++17 程序',
+          '<!--STD_CPP_END-->',
+          '样例输入输出代码块建议保留 <!--SAMPLE_INPUT-->、<!--SAMPLE_OUTPUT--> 标记，便于自动重算。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'SIMPLE_JOINT_CONTRACT',
+          `难度模式: ${difficultyMode}`,
+          `目标难度: ${difficultyInstruction}`,
+          `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
+          '',
+          '原题素材:',
+          source
+        ].join('\n')
+      }
+    ], {
+      temperature: 0.25,
+      timeoutMs: 120000,
+      maxTokens: 14000,
+      retries: 5,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'problem.log', 'simple joint contract', info);
+      },
+      onRetry: async ({ attempt, retries, error, waitMs }) => {
+        const waitSeconds = Math.ceil((waitMs || 0) / 1000);
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'problem',
+          state: 'running',
+          message: `联合设计重试 ${attempt + 1}/${retries}${waitSeconds ? `，等待 ${waitSeconds} 秒` : ''}`
+        });
+        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] simple joint retry ${attempt + 1}/${retries}: ${error.message}\n`);
+      }
+    });
+
+    const bundle = parseJointDesignBundle(designText);
+    let problem = sanitizeMarkdownArtifact(bundle.problem);
+    let algorithm = sanitizeMarkdownArtifact(bundle.algorithm);
+    let cpp = sanitizeCppCode(bundle.cpp);
+    ensureProblemMarkdownStructure(problem);
+    ensureAlgorithmPlanLooksReasonable(algorithm);
+    assertCppLooksReasonable(cpp);
+
+    problem = removeInternalSampleMarkers(problem);
+    await writeWorkspaceFile(workspaceId, 'problem/problem.md', problem);
+    await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
+    await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
+    emitProblemPreview(workspaceId, problem);
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp.slice(0, 320) });
+
+    await saveJobResult(workspaceId, 'problem', fingerprint, {
+      resultPath: 'problem/problem.md',
+      pipelineVersion: PROBLEM_PIPELINE_VERSION,
+      contractPaths: ['solution/algorithm.md', 'solution/std.cpp']
+    });
+    await updateWorkspaceMeta(workspaceId, {
+      difficulty: {
+        mode: difficultyMode,
+        text: payload.difficultyText || '',
+        instruction: difficultyInstruction
+      }
+    });
+    await setState(workspaceId, 'problem', 'done', '联合设计已生成');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'done', message: '联合设计已生成' });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] done\n`);
+    return { path: 'problem/problem.md', content: problem, cached: false };
+  } catch (error) {
+    await setState(workspaceId, 'problem', 'error', error.message || 'problem failed');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'error', message: error.message || 'problem failed' });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] failed: ${error.message}\n`);
+    throw error;
+  }
+}
+
 async function reviewAndReviseProblem(workspaceId, initialContent, source, difficultyInstruction, difficultyMode) {
   let content = initialContent || '';
   for (let round = 1; round <= 2; round += 1) {
@@ -696,6 +829,10 @@ function parseJointDesignBundle(text) {
   };
 }
 
+function removeInternalSampleMarkers(text) {
+  return String(text || '');
+}
+
 function jointArtifactsNeedRealignment(originalProblem, finalProblem, design) {
   if (!String(design?.algorithm || '').trim()) return true;
   const before = normalizeForComparison(originalProblem);
@@ -920,6 +1057,7 @@ async function logLLMComplete(workspaceId, logName, label, info) {
 
 export async function generateSolution(workspaceId) {
   return withWorkspaceLock(workspaceId, 'solution', async () => {
+    return generateSolutionVerifiedStd(workspaceId);
     try {
       let problem = await safeRead(workspaceId, 'problem/problem.md');
       assertValidText(problem, '题目未生成，无法生成题解');
@@ -1020,6 +1158,149 @@ export async function generateSolution(workspaceId) {
   });
 }
 
+async function generateSolutionVerifiedStd(workspaceId) {
+  try {
+    const problem = await safeRead(workspaceId, 'problem/problem.md');
+    assertValidText(problem, '题目未生成，无法生成题解');
+    const fingerprint = hashText(JSON.stringify({
+      version: SOLUTION_PIPELINE_VERSION,
+      problem
+    }));
+    const meta = await getWorkspaceMetaInternal(workspaceId);
+    if (
+      meta?.jobs?.solution?.fingerprint === fingerprint &&
+      (await exists(workspaceId, 'solution/algorithm.md')) &&
+      (await exists(workspaceId, 'solution/verification.md')) &&
+      (await exists(workspaceId, 'solution/solution.md')) &&
+      (await exists(workspaceId, 'solution/std.cpp'))
+    ) {
+      return {
+        algorithm: await readWorkspaceFile(workspaceId, 'solution/algorithm.md'),
+        markdown: await readWorkspaceFile(workspaceId, 'solution/solution.md'),
+        cpp: await readWorkspaceFile(workspaceId, 'solution/std.cpp'),
+        verification: await readWorkspaceFile(workspaceId, 'solution/verification.md'),
+        cached: true
+      };
+    }
+
+    const diffCtx = meta?.difficulty || {};
+    const diffInfo = diffCtx.instruction
+      ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
+      : '';
+
+    await setSolutionProgress(workspaceId, '正在验证联合设计标程');
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start verified-std workflow ${SOLUTION_PIPELINE_VERSION}\n`);
+
+    let algorithm = sanitizeMarkdownArtifact(await safeRead(workspaceId, 'solution/algorithm.md'));
+    if (!algorithm.trim()) {
+      algorithm = await generateAlgorithmPlan(workspaceId, problem, diffInfo);
+    }
+    ensureAlgorithmPlanLooksReasonable(algorithm);
+    await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
+
+    const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
+    const result = await buildVerifiedStdWorkflowArtifacts(workspaceId, {
+      problem,
+      algorithm,
+      diffInfo,
+      seedCpp
+    });
+    const finalProblem = await safeRead(workspaceId, 'problem/problem.md') || problem;
+    const finalFingerprint = hashText(JSON.stringify({
+      version: SOLUTION_PIPELINE_VERSION,
+      problem: finalProblem
+    }));
+    await persistSolutionArtifacts(workspaceId, finalFingerprint, result);
+    return { ...result, cached: false };
+  } catch (error) {
+    await setState(workspaceId, 'solution', 'error', error.message || 'solution failed');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'solution', state: 'error', message: error.message || 'solution failed' });
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] failed: ${error.message}\n`);
+    throw error;
+  }
+}
+
+async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp = '', modeLabel = 'verified-std' }) {
+  const attempts = [];
+  let lastFailure = '';
+  const startedAt = Date.now();
+  for (let candidate = 1; candidate <= SOLUTION_MAX_CANDIDATES; candidate += 1) {
+    try {
+      assertSolutionBudget(startedAt, `before candidate ${candidate}`);
+      const usingSeed = candidate === 1 && String(seedCpp || '').trim();
+      await setSolutionProgress(workspaceId, usingSeed ? '正在编译联合标程' : `正在重写标程 ${candidate}/${SOLUTION_MAX_CANDIDATES}`);
+      const rawCpp = usingSeed
+        ? seedCpp
+        : await generateStdCppCandidate(workspaceId, {
+            problem,
+            algorithm,
+            diffInfo,
+            lastFailure,
+            candidate
+          });
+      let cpp = sanitizeCppCode(rawCpp);
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp.slice(0, 320) });
+      assertCppLooksReasonable(cpp);
+      cpp = await repairCppCompilation(workspaceId, cpp, problem);
+      await setSolutionProgress(workspaceId, '正在做独立代码审查');
+      cpp = await crossReviewStdCpp(workspaceId, cpp, problem, null);
+      await setSolutionProgress(workspaceId, '正在用独立 oracle 对拍');
+      cpp = await verifyWithIndependentOracle(workspaceId, cpp, problem);
+      await setSolutionProgress(workspaceId, '正在用标程重算样例');
+      await verifySampleWithStd(workspaceId, cpp);
+      await setSolutionProgress(workspaceId, '正在由已验证标程生成题解');
+      const markdown = await generateFinalSolutionMarkdown(workspaceId, {
+        problem: await safeRead(workspaceId, 'problem/problem.md') || problem,
+        algorithm,
+        cpp,
+        diffInfo
+      });
+      ensureSolutionMarkdownStructure(markdown);
+      assertSolutionTextLooksReasonable(markdown, cpp);
+      await verifyFullScoreReview(workspaceId, markdown, cpp, await safeRead(workspaceId, 'problem/problem.md') || problem, diffInfo);
+
+      attempts.push({
+        candidate,
+        state: 'accepted',
+        gates: ['compile', 'llm-code-review', `independent-oracle-${INDEPENDENT_ORACLE_CASES}+cases`, 'sample-recomputed', 'solution-from-accepted-std', 'full-ac-review']
+      });
+      const verification = buildVerificationReport({
+        problem: await safeRead(workspaceId, 'problem/problem.md') || problem,
+        diffInfo,
+        algorithm,
+        reliability: { level: 'contract-first', reasons: ['std accepted by executable gates'] },
+        attempts,
+        acceptedCandidate: candidate,
+        cpp,
+        modeLabel
+      });
+      return { algorithm, markdown, cpp, verification };
+    } catch (candidateError) {
+      lastFailure = String(candidateError?.message || candidateError || '').slice(0, 5000);
+      attempts.push({ candidate, state: 'rejected', error: lastFailure });
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] candidate ${candidate}/${SOLUTION_MAX_CANDIDATES} failed: ${lastFailure}\n`);
+      if (candidate === SOLUTION_MAX_CANDIDATES) {
+        const verification = buildVerificationReport({
+          problem,
+          diffInfo,
+          algorithm,
+          reliability: { level: 'failed', reasons: ['no candidate passed executable gates'] },
+          attempts,
+          acceptedCandidate: null,
+          cpp: '',
+          modeLabel
+        });
+        await writeWorkspaceFile(workspaceId, 'solution/verification.md', verification);
+        const error = new Error(`std verification failed after ${SOLUTION_MAX_CANDIDATES} candidates: ${lastFailure}`);
+        error.statusCode = candidateError.statusCode || 422;
+        throw error;
+      }
+    }
+  }
+  throw new Error('unreachable verified std workflow state');
+}
+
 export async function regenerateStdSolution(workspaceId) {
   return withWorkspaceLock(workspaceId, 'solution', async () => {
     try {
@@ -1049,10 +1330,11 @@ export async function regenerateStdSolution(workspaceId) {
 
       await setSolutionProgress(workspaceId, '正在重生成并验证标程');
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] start std-only regeneration ${SOLUTION_PIPELINE_VERSION}\n`);
-      const result = await buildVerifiedSolutionArtifacts(workspaceId, {
+      const result = await buildVerifiedStdWorkflowArtifacts(workspaceId, {
         problem,
         algorithm: existingAlgorithm,
         diffInfo,
+        seedCpp: '',
         modeLabel: 'std-only'
       });
       await persistSolutionArtifacts(workspaceId, fingerprint, result);
@@ -1517,6 +1799,7 @@ function buildVerificationReport({ problem, diffInfo, algorithm, reliability, at
 
 export async function generateDataPlan(workspaceId) {
   return withWorkspaceLock(workspaceId, 'data', async () => {
+    return generateDataBundleWorkflow(workspaceId);
     try {
       const solution = await safeRead(workspaceId, 'solution/solution.md');
       assertValidText(solution, '题解未生成，无法生成数据');
@@ -1683,6 +1966,166 @@ export async function generateDataPlan(workspaceId) {
       throw error;
     }
   });
+}
+
+async function generateDataBundleWorkflow(workspaceId) {
+  try {
+    const solution = await safeRead(workspaceId, 'solution/solution.md');
+    assertValidText(solution, '题解未生成，无法生成数据');
+    const problemMd = await safeRead(workspaceId, 'problem/problem.md');
+    const stdCpp = await safeRead(workspaceId, 'solution/std.cpp');
+    const fingerprint = hashText(JSON.stringify({
+      version: DATA_PIPELINE_VERSION,
+      problemMd,
+      solution,
+      stdCpp
+    }));
+    const meta = await getWorkspaceMetaInternal(workspaceId);
+    if (
+      meta?.jobs?.data?.fingerprint === fingerprint &&
+      (await exists(workspaceId, 'data/hack_plan.md')) &&
+      (await exists(workspaceId, 'data/gen.py')) &&
+      (await exists(workspaceId, 'data/validator.py')) &&
+      (await exists(workspaceId, 'data/problem_type.json'))
+    ) {
+      return {
+        plan: await readWorkspaceFile(workspaceId, 'data/hack_plan.md'),
+        genPy: await readWorkspaceFile(workspaceId, 'data/gen.py'),
+        validatorPy: await readWorkspaceFile(workspaceId, 'data/validator.py'),
+        problemType: JSON.parse(await readWorkspaceFile(workspaceId, 'data/problem_type.json')),
+        checkerCpp: await safeRead(workspaceId, 'data/checker.cpp'),
+        cached: true
+      };
+    }
+
+    const diffCtx = meta?.difficulty || {};
+    const diffInfo = diffCtx.instruction
+      ? `目标难度：${diffCtx.instruction}（模式：${diffCtx.mode}${diffCtx.text ? `，说明：${diffCtx.text}` : ''}）`
+      : '';
+
+    await setState(workspaceId, 'data', 'running', '正在一次性生成数据合同');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'running', message: '正在一次性生成数据合同' });
+    await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] start data bundle workflow ${DATA_PIPELINE_VERSION}\n`);
+
+    const bundleText = await callLLM([
+      {
+        role: 'system',
+        content: [
+          '你是 OI 数据工程 agent。一次性交付数据方案、输入生成器、输入 validator、题型判定 JSON，必要时交付 checker.cpp。',
+          '数据必须服务于发现错误 std：覆盖边界、随机、退化、最大规模、特殊合法场景，并严格满足题面输入保证。',
+          '不要另造输入格式；以题面和已验证 std.cpp 的读入顺序为准。',
+          'gen.py 必须在当前目录直接生成若干 .in 文件；validator.py 从 stdin 校验单个测试点。',
+          '输出只使用以下分段：',
+          '<!--DATA_PLAN_MD-->',
+          '# 数据方案',
+          '## 点数分布',
+          '<!--DATA_PLAN_MD_END-->',
+          '<!--PROBLEM_TYPE_JSON-->',
+          '{"type":"standard","outputUniqueness":"unique","requiresChecker":false,"reasons":[]}',
+          '<!--PROBLEM_TYPE_JSON_END-->',
+          '<!--GEN_PY-->',
+          '完整 Python3 生成器',
+          '<!--GEN_PY_END-->',
+          '<!--VALIDATOR_PY-->',
+          '完整 Python3 validator',
+          '<!--VALIDATOR_PY_END-->',
+          '<!--CHECKER_CPP-->',
+          '若 requiresChecker=false 可留空；否则输出完整 C++17 checker',
+          '<!--CHECKER_CPP_END-->'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          'DATA_BUNDLE',
+          diffInfo,
+          '',
+          '题面:',
+          problemMd || '',
+          '',
+          '已验证题解:',
+          solution || '',
+          '',
+          '已验证 std.cpp:',
+          stdCpp || ''
+        ].join('\n')
+      }
+    ], {
+      temperature: 0.18,
+      timeoutMs: 120000,
+      maxTokens: 14000,
+      retries: 5,
+      onComplete: async info => {
+        await logLLMComplete(workspaceId, 'data.log', 'data bundle', info);
+      },
+      onRetry: async ({ attempt, retries, error }) => {
+        emitWorkspaceEvent(workspaceId, 'task:update', {
+          stage: 'data',
+          state: 'running',
+          message: `数据合同重试 ${attempt + 1}/${retries}`
+        });
+        await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] data bundle retry ${attempt + 1}/${retries}: ${error.message}\n`);
+      }
+    });
+
+    let plan = sanitizeMarkdownArtifact(extractBetween(bundleText, '<!--DATA_PLAN_MD-->', '<!--DATA_PLAN_MD_END-->'));
+    let genPy = sanitizePythonCode(extractBetween(bundleText, '<!--GEN_PY-->', '<!--GEN_PY_END-->'));
+    let validatorPy = sanitizePythonCode(extractBetween(bundleText, '<!--VALIDATOR_PY-->', '<!--VALIDATOR_PY_END-->'));
+    const problemType = parseJsonOrDefault(
+      extractJsonObject(extractBetween(bundleText, '<!--PROBLEM_TYPE_JSON-->', '<!--PROBLEM_TYPE_JSON_END-->')),
+      { type: 'unknown', outputUniqueness: 'unknown', requiresChecker: false, reasons: ['invalid problem type json'] }
+    );
+    let checkerCpp = sanitizeCppCode(extractBetween(bundleText, '<!--CHECKER_CPP-->', '<!--CHECKER_CPP_END-->'));
+
+    ensureDataPlanMarkdownStructure(plan);
+    ensurePythonGeneratorShape(genPy);
+    ensureValidatorShape(validatorPy);
+    assertDataArtifactsRespectProblemGuarantees(problemMd, plan, genPy, validatorPy);
+    plan = await validateDataPlanGenConsistency(workspaceId, plan, genPy, diffInfo);
+    if (problemType.requiresChecker) {
+      if (!checkerCpp) {
+        checkerCpp = await generateCheckerCpp(workspaceId, {
+          problemMd,
+          solution,
+          stdCpp,
+          problemType,
+          diffInfo
+        });
+      }
+      await verifyCheckerCompiles(workspaceId, checkerCpp);
+      await writeWorkspaceFile(workspaceId, 'data/checker.cpp', checkerCpp);
+    }
+
+    await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
+    await writeWorkspaceFile(workspaceId, 'data/gen.py', genPy);
+    await writeWorkspaceFile(workspaceId, 'data/validator.py', validatorPy);
+    await writeWorkspaceFile(workspaceId, 'data/problem_type.json', JSON.stringify({
+      type: String(problemType.type || 'unknown'),
+      outputUniqueness: String(problemType.outputUniqueness || 'unknown'),
+      requiresChecker: Boolean(problemType.requiresChecker),
+      reasons: Array.isArray(problemType.reasons) ? problemType.reasons.map(String) : []
+    }, null, 2));
+    await saveJobResult(workspaceId, 'data', fingerprint, {
+      resultPaths: ['data/hack_plan.md', 'data/gen.py', 'data/validator.py', 'data/problem_type.json', ...(checkerCpp ? ['data/checker.cpp'] : [])],
+      pipelineVersion: DATA_PIPELINE_VERSION
+    });
+    await setState(workspaceId, 'data', 'done', '数据合同已生成');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'done', message: '数据合同已生成' });
+    await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] done\n`);
+
+    try {
+      await runDataGenerator(workspaceId);
+    } catch (runError) {
+      await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] auto run failed: ${runError.message}\n`);
+    }
+
+    return { plan, genPy, validatorPy, problemType, checkerCpp, cached: false };
+  } catch (error) {
+    await setState(workspaceId, 'data', 'error', error.message || 'data planning failed');
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'data', state: 'error', message: error.message || 'data planning failed' });
+    await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] failed: ${error.message}\n`);
+    throw error;
+  }
 }
 
 export async function runDataGenerator(workspaceId) {
@@ -2340,11 +2783,11 @@ function getProblemMarkdownIssues(text) {
 }
 
 function hasSampleInputHeading(content) {
-  return /#{2,4}\s*(样例\s*)?(输入|input)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输入样例/i.test(content);
+  return /<!--SAMPLE_INPUT\d*-->/.test(content) || /#{2,4}\s*(样例\s*)?(输入|input)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输入样例/i.test(content);
 }
 
 function hasSampleOutputHeading(content) {
-  return /#{2,4}\s*(样例\s*)?(输出|output)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输出样例/i.test(content);
+  return /<!--SAMPLE_OUTPUT\d*-->/.test(content) || /#{2,4}\s*(样例\s*)?(输出|output)(\s*(#|编号)?\s*\d+)?/i.test(content) || /输出样例/i.test(content);
 }
 
 function buildDifficultyInstruction(mode, text) {
@@ -2994,6 +3437,106 @@ async function verifyWithBruteOracle(workspaceId, stdCpp, problem) {
   }
   // FIX2: return stdCpp so caller can capture any repaired version
   return stdCpp;
+}
+
+async function verifyWithIndependentOracle(workspaceId, stdCpp, problem) {
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] independent oracle verification start cases=${INDEPENDENT_ORACLE_CASES}\n`);
+  const bundleText = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 正确性验证工程师。为给定题目写一个小规模独立 oracle 和一个合法测试生成器，用于对拍候选 std.cpp。',
+        'oracle 必须优先正确性，可以暴力枚举、搜索、模拟、Floyd、朴素 DP；不要照抄候选 std.cpp 的算法。',
+        `测试生成器至少输出 ${INDEPENDENT_ORACLE_CASES} 组完整合法输入，组间用一行 ===CASE=== 分隔。`,
+        '覆盖最小规模、边界值、随机、退化结构、无解/临界可行、多操作类型等题面允许的情况。',
+        '输出只使用以下分段：',
+        '<!--ORACLE_CPP-->',
+        '完整 C++17 oracle',
+        '<!--ORACLE_CPP_END-->',
+        '<!--TEST_GEN_PY-->',
+        '完整 Python3 生成器',
+        '<!--TEST_GEN_PY_END-->'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'INDEPENDENT_ORACLE_BUNDLE',
+        '题目:',
+        problem || '',
+        '',
+        '候选 std.cpp:',
+        stdCpp || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.18,
+    timeoutMs: 120000,
+    maxTokens: 12000,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', 'independent oracle bundle', info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] independent oracle retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+
+  const oracleCpp = sanitizeCppCode(extractBetween(bundleText, '<!--ORACLE_CPP-->', '<!--ORACLE_CPP_END-->') || bundleText);
+  const genPy = sanitizePythonCode(extractBetween(bundleText, '<!--TEST_GEN_PY-->', '<!--TEST_GEN_PY_END-->'));
+  if (!oracleCpp || !genPy) {
+    const error = new Error('independent oracle bundle missing oracle.cpp or test generator');
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-independent-${workspaceId}-`));
+  try {
+    const stdPath = path.join(tmpDir, 'std');
+    const oraclePath = path.join(tmpDir, 'oracle');
+    await fs.writeFile(stdPath + '.cpp', stdCpp, 'utf8');
+    await fs.writeFile(oraclePath + '.cpp', oracleCpp, 'utf8');
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', stdPath + '.cpp', '-o', stdPath], 60000);
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', oraclePath + '.cpp', '-o', oraclePath], 60000);
+
+    const generated = await runPython(genPy, 30000);
+    const cases = generated.stdout.split('===CASE===').map(s => s.trim()).filter(Boolean);
+    if (cases.length < INDEPENDENT_ORACLE_CASES) {
+      const error = new Error(`independent oracle generator produced too few cases (${cases.length})`);
+      error.statusCode = 422;
+      throw error;
+    }
+
+    const disagreements = [];
+    for (let i = 0; i < cases.length; i += 1) {
+      const input = cases[i];
+      const stdOut = await runStdWithInput(stdPath, input, 30000).catch(e => `ERR:${e.message}`);
+      const oracleOut = await runStdWithInput(oraclePath, input, 30000).catch(e => `ERR:${e.message}`);
+      if (normalizeJudgeOutput(stdOut) !== normalizeJudgeOutput(oracleOut)) {
+        disagreements.push({ index: i + 1, input, stdOut: stdOut.trim(), oracleOut: oracleOut.trim() });
+        if (disagreements.length >= 5) break;
+      }
+    }
+
+    if (disagreements.length) {
+      const detail = disagreements.map(d => [
+        `case ${d.index}:`,
+        'input:',
+        d.input.slice(0, 1200),
+        `std: ${d.stdOut.slice(0, 300)}`,
+        `oracle: ${d.oracleOut.slice(0, 300)}`
+      ].join('\n')).join('\n\n');
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] independent oracle failed:\n${detail.slice(0, 3000)}\n`);
+      const error = new Error(`independent oracle verification failed with ${disagreements.length} disagreement(s)\n${detail}`);
+      error.statusCode = 422;
+      throw error;
+    }
+
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] independent oracle passed ${cases.length} cases\n`);
+    return stdCpp;
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
 }
 
 async function verifyWithCounterexampleSearch(workspaceId, stdCpp, problem) {
