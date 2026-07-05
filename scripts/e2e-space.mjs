@@ -191,14 +191,29 @@ async function step(name, fn) {
 
 async function runJob(name, stage, path, requiredFiles, options) {
   return step(name, async () => {
-    for (let attempt = 0; attempt <= rateLimitRetries; attempt += 1) {
+    const startRetries = Math.max(rateLimitRetries, 2);
+    for (let attempt = 0; attempt <= startRetries; attempt += 1) {
       try {
         let directResult = null;
+        let interrupted = false;
         try {
           directResult = await api(path, options);
         } catch (error) {
           if (!isLikelyLongRequestDisconnect(error)) throw error;
-          console.warn(`request interrupted for ${name}; polling workspace state`);
+          interrupted = true;
+          console.warn(`request interrupted for ${name}; confirming whether the job started`);
+        }
+
+        if (interrupted) {
+          const startState = await waitForStageStart(stage, requiredFiles, 30000);
+          if (startState.ready) return readJobResult(requiredFiles);
+          if (!startState.started) {
+            if (attempt >= startRetries) {
+              throw new Error(`${name} request disconnected before the server accepted the async job`);
+            }
+            console.warn(`${name} still idle after disconnect; retrying async start ${attempt + 1}/${startRetries}`);
+            continue;
+          }
         }
 
         const pollResult = await waitForStage(stage, requiredFiles, timeoutMs);
@@ -217,24 +232,52 @@ async function runJob(name, stage, path, requiredFiles, options) {
   });
 }
 
+async function waitForStageStart(stage, requiredFiles, totalTimeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < totalTimeoutMs) {
+    const snapshot = await getStageSnapshot(stage);
+    if (requiredFiles.every(file => snapshot.files.includes(file))) {
+      return { ...snapshot, ready: true, started: true };
+    }
+    if (snapshot.state === 'running' || snapshot.state === 'done' || snapshot.state === 'error') {
+      return { ...snapshot, ready: false, started: true };
+    }
+    await sleep(3000);
+  }
+  const snapshot = await getStageSnapshot(stage);
+  return {
+    ...snapshot,
+    ready: requiredFiles.every(file => snapshot.files.includes(file)),
+    started: snapshot.state === 'running' || snapshot.state === 'done' || snapshot.state === 'error'
+  };
+}
+
 async function waitForStage(stage, requiredFiles, totalTimeoutMs) {
   const started = Date.now();
   while (Date.now() - started < totalTimeoutMs) {
-    const [meta, files] = await Promise.all([
-      api(`/api/workspaces/${workspace.workspaceId}`, { token: workspace.accessToken }),
-      api(`/api/workspaces/${workspace.workspaceId}/files`, { token: workspace.accessToken })
-    ]);
-    const fileList = files.files || [];
-    if (requiredFiles.every(file => fileList.includes(file))) {
-      return { meta, files: fileList };
+    const snapshot = await getStageSnapshot(stage);
+    if (requiredFiles.every(file => snapshot.files.includes(file))) {
+      return { meta: snapshot.meta, files: snapshot.files };
     }
-    const stageState = meta.status?.[stage]?.state;
-    if (stageState === 'error') {
-      throw new Error(meta.status?.[stage]?.message || `${stage} failed`);
+    if (snapshot.state === 'error') {
+      throw new Error(snapshot.message || `${stage} failed`);
     }
     await sleep(5000);
   }
   throw new Error(`${stage} did not finish within ${totalTimeoutMs}ms`);
+}
+
+async function getStageSnapshot(stage) {
+  const [meta, files] = await Promise.all([
+    api(`/api/workspaces/${workspace.workspaceId}`, { token: workspace.accessToken }),
+    api(`/api/workspaces/${workspace.workspaceId}/files`, { token: workspace.accessToken })
+  ]);
+  return {
+    meta,
+    files: files.files || [],
+    state: meta.status?.[stage]?.state || 'idle',
+    message: meta.status?.[stage]?.message || ''
+  };
 }
 
 async function readJobResult(requiredFiles) {
