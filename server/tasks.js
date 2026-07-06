@@ -539,6 +539,10 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     let problem = sanitizeMarkdownArtifact(bundle.problem);
     let algorithm = sanitizeMarkdownArtifact(bundle.algorithm);
     let cpp = sanitizeCppCode(bundle.cpp);
+    if (getProblemMarkdownIssues(problem).length) {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design problem shape invalid; repairing markdown structure: ${getProblemMarkdownIssues(problem).join(', ')}\n`);
+      problem = await completeProblemMarkdown(workspaceId, problem || designText, source, difficultyInstruction, difficultyMode);
+    }
     ensureProblemMarkdownStructure(problem);
     if (!algorithm.trim()) {
       await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design missing algorithm segment; generating contract from final problem\n`);
