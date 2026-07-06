@@ -60,7 +60,7 @@ const DATA_PIPELINE_VERSION = 'data-bundle-workflow-v1';
 const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
 const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'standard', ['fast', 'standard', 'strict']);
-const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 2));
+const SOLUTION_MAX_CANDIDATES = Math.max(1, envInt('SOLUTION_MAX_CANDIDATES', 3));
 const SOLUTION_REVIEW_ROUNDS = Math.max(1, envInt('SOLUTION_REVIEW_ROUNDS', 3));
 const SOLUTION_TIME_BUDGET_MS = Math.max(60_000, envInt('SOLUTION_TIME_BUDGET_MS', 10 * 60 * 1000));
 const SOLUTION_REDESIGN_ROUNDS = Math.max(0, envIntAllowZero('SOLUTION_REDESIGN_ROUNDS', 2));
@@ -1325,6 +1325,7 @@ async function generateSolutionVerifiedStd(workspaceId) {
 }
 
 async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorithm, diffInfo, seedCpp = '', modeLabel = 'verified-std' }) {
+  let currentAlgorithm = algorithm;
   const attempts = [];
   let lastFailure = '';
   const startedAt = Date.now();
@@ -1337,7 +1338,7 @@ async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorit
         ? seedCpp
         : await generateStdCppCandidate(workspaceId, {
             problem,
-            algorithm,
+            algorithm: currentAlgorithm,
             diffInfo,
             lastFailure,
             candidate
@@ -1355,7 +1356,7 @@ async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorit
       await setSolutionProgress(workspaceId, '正在由已验证标程生成题解');
       const markdown = await generateFinalSolutionMarkdown(workspaceId, {
         problem: await safeRead(workspaceId, 'problem/problem.md') || problem,
-        algorithm,
+        algorithm: currentAlgorithm,
         cpp,
         diffInfo
       });
@@ -1371,23 +1372,35 @@ async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorit
       const verification = buildVerificationReport({
         problem: await safeRead(workspaceId, 'problem/problem.md') || problem,
         diffInfo,
-        algorithm,
+        algorithm: currentAlgorithm,
         reliability: { level: 'contract-first', reasons: ['std accepted by executable gates'] },
         attempts,
         acceptedCandidate: candidate,
         cpp,
         modeLabel
       });
-      return { algorithm, markdown, cpp, verification };
+      return { algorithm: currentAlgorithm, markdown, cpp, verification };
     } catch (candidateError) {
       lastFailure = String(candidateError?.message || candidateError || '').slice(0, 5000);
       attempts.push({ candidate, state: 'rejected', error: lastFailure });
       await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] candidate ${candidate}/${SOLUTION_MAX_CANDIDATES} failed: ${lastFailure}\n`);
+      if (candidate < SOLUTION_MAX_CANDIDATES && isCoreAlgorithmFailureMessage(lastFailure)) {
+        await setSolutionProgress(workspaceId, `正在根据失败反馈重写算法合同 ${candidate}/${SOLUTION_MAX_CANDIDATES}`);
+        currentAlgorithm = await repairAlgorithmContractAfterStdFailure(workspaceId, {
+          problem,
+          algorithm: currentAlgorithm,
+          diffInfo,
+          failure: lastFailure,
+          candidate
+        });
+        await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', currentAlgorithm);
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: currentAlgorithm });
+      }
       if (candidate === SOLUTION_MAX_CANDIDATES) {
         const verification = buildVerificationReport({
           problem,
           diffInfo,
-          algorithm,
+          algorithm: currentAlgorithm,
           reliability: { level: 'failed', reasons: ['no candidate passed executable gates'] },
           attempts,
           acceptedCandidate: null,
@@ -1548,6 +1561,65 @@ function isDesignRedesignableSolutionFailure(error) {
   const message = String(error?.message || '');
   const status = Number(error?.statusCode || 0);
   return status === 422 && /solution quality gates failed|code review did not reach PASS|full AC review failed|brute oracle verification failed|counterexample verification failed|dual solution verification/i.test(message);
+}
+
+function isCoreAlgorithmFailureMessage(message) {
+  return /code review did not reach PASS|核心|根本|严重|反例|漏解|状态定义|状态转移|转移.*错误|贪心.*错误|复杂度超限|TLE|不完整|不完备|无法处理|语义.*错误|算法契约/i.test(String(message || ''));
+}
+
+async function repairAlgorithmContractAfterStdFailure(workspaceId, { problem, algorithm, diffInfo, failure, candidate }) {
+  const repaired = await callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 联合设计 agent 的算法合同重写步骤。当前 std.cpp 已被代码审查证明核心算法错误。',
+        '不要修改题面，不要降低题型多样性；只重写算法合同，使下一份 std.cpp 能从正确合同实现。',
+        '失败报告是硬约束：报告点名错误的状态定义、转移、贪心、复杂度、费用语义、经过不操作等问题，新合同必须逐条消除。',
+        '如果原算法合同无法支撑正确实现，必须完全推翻原合同，从题面重新建模。',
+        '输出 Markdown，必须包含且只包含这些主章节：',
+        '# 算法草案',
+        '## 题目重述',
+        '## 约束提取',
+        '## 算法选择',
+        '## 正确性要点',
+        '## 复杂度目标',
+        '## 高风险反例',
+        '算法选择必须写清状态含义、转移/合并规则、边界条件；若涉及容量/燃料/费用/固定手续费，必须明确“经过但不购买”“购买量为 0”“补满/不补满”等决策如何表示，不能只保留两个特殊油量状态，除非证明足够。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'ALGORITHM_CONTRACT_AFTER_STD_FAILURE',
+        `候选失败轮次: ${candidate}`,
+        diffInfo,
+        '',
+        '题面:',
+        problem || '',
+        '',
+        '当前算法合同:',
+        algorithm || '',
+        '',
+        'std.cpp 失败报告:',
+        String(failure || '').slice(0, 7000)
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.12,
+    timeoutMs: 120000,
+    maxTokens: 8192,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'solution.log', `algorithm contract after std failure ${candidate}`, info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] algorithm contract failure repair retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  const cleaned = sanitizeMarkdownArtifact(repaired);
+  ensureAlgorithmPlanLooksReasonable(cleaned);
+  await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] algorithm contract rewritten after candidate ${candidate} failure\n`);
+  return cleaned;
 }
 
 async function redesignJointArtifactsAfterSolutionFailure(workspaceId, { problem, algorithm, diffInfo, difficultyInstruction = '', difficultyMode = '', failure = '' }) {
