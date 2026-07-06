@@ -539,9 +539,12 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     let problem = sanitizeMarkdownArtifact(bundle.problem);
     let algorithm = sanitizeMarkdownArtifact(bundle.algorithm);
     let cpp = sanitizeCppCode(bundle.cpp);
-    if (getProblemMarkdownIssues(problem).length) {
-      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design problem shape invalid; repairing markdown structure: ${getProblemMarkdownIssues(problem).join(', ')}\n`);
-      problem = await completeProblemMarkdown(workspaceId, problem || designText, source, difficultyInstruction, difficultyMode);
+    const problemIssues = getProblemMarkdownIssues(problem);
+    if (problemIssues.length) {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design problem shape invalid; repairing markdown structure: ${problemIssues.join(', ')}\n`);
+      problem = hasOnlySoftProblemMarkdownIssues(problemIssues)
+        ? repairSoftProblemMarkdownIssues(problem)
+        : await completeProblemMarkdown(workspaceId, problem || designText, source, difficultyInstruction, difficultyMode);
     }
     ensureProblemMarkdownStructure(problem);
     if (!algorithm.trim()) {
@@ -2960,6 +2963,27 @@ function getProblemMarkdownIssues(text) {
     issues.push('末尾疑似截断');
   }
   return Array.from(new Set(issues));
+}
+
+function hasOnlySoftProblemMarkdownIssues(issues) {
+  const soft = new Set(['代码块未闭合', '末尾疑似截断']);
+  return Array.isArray(issues) && issues.length > 0 && issues.every(issue => soft.has(issue));
+}
+
+function repairSoftProblemMarkdownIssues(text) {
+  let content = String(text || '').trimEnd();
+  const fenceCount = (content.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) {
+    content += '\n```';
+  }
+  if (content.endsWith('：')) {
+    content += '见题面约束。';
+  } else if (content.endsWith('`')) {
+    content += '\n';
+  } else if (/等\s*$/.test(content)) {
+    content += '。';
+  }
+  return content.trim();
 }
 
 function hasSampleInputHeading(content) {
