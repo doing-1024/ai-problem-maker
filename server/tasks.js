@@ -417,11 +417,11 @@ export async function generateProblem(workspaceId, payload) {
           label: 'final algorithm'
         });
         await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', design.algorithm);
-        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm.slice(0, 320) });
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: design.algorithm });
       }
       if (design.cpp) {
         await writeWorkspaceFile(workspaceId, 'solution/std.cpp', design.cpp);
-        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: design.cpp.slice(0, 320) });
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: design.cpp });
       }
       await saveJobResult(workspaceId, 'problem', fingerprint, { resultPath: 'problem/problem.md' });
       await updateWorkspaceMeta(workspaceId, {
@@ -561,8 +561,8 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
     await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
     emitProblemPreview(workspaceId, problem);
-    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
-    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp.slice(0, 320) });
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm });
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp });
 
     await saveJobResult(workspaceId, 'problem', fingerprint, {
       resultPath: 'problem/problem.md',
@@ -911,7 +911,7 @@ async function completeProblemMarkdown(workspaceId, initialContent, source, diff
 function emitProblemPreview(workspaceId, content) {
   emitWorkspaceEvent(workspaceId, 'task:partial', {
     stage: 'problem',
-    text: String(content || '').slice(0, 2000)
+    text: String(content || '')
   });
 }
 
@@ -1206,7 +1206,7 @@ export async function generateSolution(workspaceId) {
         label: 'solution algorithm'
       });
       await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm });
       let result;
       for (let redesignRound = 0; redesignRound <= SOLUTION_REDESIGN_ROUNDS; redesignRound += 1) {
         try {
@@ -1296,7 +1296,7 @@ async function generateSolutionVerifiedStd(workspaceId) {
     }
     ensureAlgorithmPlanLooksReasonable(algorithm);
     await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
-    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm.slice(0, 320) });
+    emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm });
 
     const seedCpp = await safeRead(workspaceId, 'solution/std.cpp');
     const result = await buildVerifiedStdWorkflowArtifacts(workspaceId, {
@@ -1339,7 +1339,7 @@ async function buildVerifiedStdWorkflowArtifacts(workspaceId, { problem, algorit
             candidate
           });
       let cpp = sanitizeCppCode(rawCpp);
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp.slice(0, 320) });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp });
       assertCppLooksReasonable(cpp);
       cpp = await repairCppCompilation(workspaceId, cpp, problem);
       await setSolutionProgress(workspaceId, '正在做独立代码审查');
@@ -1473,7 +1473,7 @@ async function buildVerifiedSolutionArtifacts(workspaceId, { problem, algorithm,
             lastFailure,
             candidate
           });
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: rawCpp.slice(0, 320) });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: rawCpp });
       const verified = await validateStdCppCandidate(workspaceId, rawCpp, problem, candidate, {
         startedAt,
         reliability,
@@ -1626,9 +1626,9 @@ async function redesignJointArtifactsAfterSolutionFailure(workspaceId, { problem
     await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] redesigned std seed ignored: ${error.message}\n`);
     newCpp = '';
   }
-  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: newProblem.slice(0, 1200) });
-  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: newAlgorithm.slice(0, 320) });
-  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: newCpp.slice(0, 320) });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'problem', text: newProblem });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: newAlgorithm });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: newCpp });
   return { problem: newProblem, algorithm: newAlgorithm, cpp: newCpp };
 }
 
@@ -1967,7 +1967,7 @@ export async function generateDataPlan(workspaceId) {
           await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] plan retry ${attempt + 1}/${retries}: ${error.message}\n`);
         }
       });
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan.slice(0, 320) });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan', text: plan });
       plan = await repairDataPlanOutput(workspaceId, plan, solution, diffInfo);
       ensureDataPlanMarkdownStructure(plan);
       await writeWorkspaceFile(workspaceId, 'data/hack_plan.md', plan);
@@ -2018,7 +2018,7 @@ export async function generateDataPlan(workspaceId) {
           await appendWorkspaceLog(workspaceId, 'data.log', `[${stamp()}] gen retry ${attempt + 1}/${retries}: ${error.message}\n`);
         }
       });
-      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy.slice(0, 320) });
+      emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'gen', text: genPy });
       genPy = sanitizePythonCode(genPy);
       ensurePythonGeneratorShape(genPy);
       assertDataPlanLooksReasonable(plan, genPy);
@@ -2300,7 +2300,7 @@ export async function runDataGenerator(workspaceId) {
           problemType,
           checkerCpp
         });
-        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '').slice(0, 320) });
+        emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'run', text: (result.stdout || result.stderr || '') });
         assertDataZipLooksValid(result.zipContent);
         await verifyZipArchive(result.zipContent);
         await assertGeneratedInputsRespectProblemGuarantees(problemMd, result.zipContent);
@@ -2983,7 +2983,7 @@ async function repairSolutionOutput(workspaceId, finalText, problem, diffInfo) {
       }
     }
   );
-  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'repair', text: repaired.slice(0, 320) });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'repair', text: repaired });
   return repaired;
 }
 
@@ -3984,7 +3984,7 @@ async function repairDataPlanOutput(workspaceId, plan, solution, diffInfo) {
       }
     }
   );
-  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan-repair', text: repaired.slice(0, 320) });
+  emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'data', phase: 'plan-repair', text: repaired });
   return repaired;
 }
 
