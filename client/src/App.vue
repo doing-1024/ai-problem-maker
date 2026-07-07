@@ -93,7 +93,7 @@
         <section class="ops-section">
           <div class="pane-head">
             <h2>业务流程</h2>
-            <span>{{ pipelineDone }}/4</span>
+            <span>{{ pipelineDone }}/3</span>
           </div>
           <div class="pipeline">
             <div v-for="step in pipeline" :key="step.key" class="pipeline-step" :class="step.state">
@@ -112,15 +112,9 @@
         <section class="ops-section">
           <div class="pane-head">
             <h2>难度设置</h2>
-            <span>{{ difficultyMode === 'same' ? '同难度' : '自定义' }}</span>
+            <span>原创</span>
           </div>
-          <select v-model="difficultyMode">
-            <option value="same">参考原题，强改背景</option>
-            <option value="custom">用户自行设定</option>
-          </select>
-          <input v-if="difficultyMode === 'custom'" v-model="difficultyText" placeholder="目标难度，如 NOIP T2 / 省选入门" />
-          <textarea v-model="problemRaw" class="source-input" placeholder="原题素材，可从 input/problem_raw.md 载入或直接粘贴"></textarea>
-          <button class="button primary block" @click="saveProblemRaw">保存原题素材</button>
+          <input v-model="difficultyText" placeholder="目标难度，如 CSP-S T4 / NOIP T3 / 省选入门" />
         </section>
 
         <section class="ops-section">
@@ -172,8 +166,7 @@ const editorContent = ref('');
 const editorHost = ref(null);
 const zipPreviewData = ref(null);
 const selectedZipFile = ref('');
-const problemRaw = ref('');
-const difficultyMode = ref('same');
+const difficultyMode = ref('custom');
 const difficultyText = ref('');
 const errorMessage = ref('');
 const successMessage = ref('');
@@ -195,7 +188,6 @@ let refreshTimer = null;
 let refreshInFlight = false;
 
 const writableFiles = new Set([
-  'input/problem_raw.md',
   'problem/problem.md',
   'solution/solution.md',
   'solution/std.cpp',
@@ -228,19 +220,10 @@ const groupedFiles = computed(() => {
 
 const pipeline = computed(() => [
   {
-    key: 'input',
-    label: '原题素材',
-    state: problemRaw.value.trim() ? 'done' : 'idle',
-    message: problemRaw.value.trim() ? '已准备输入素材' : '粘贴或编辑原题素材',
-    actionLabel: '保存',
-    action: saveProblemRaw,
-    disabled: !workspaceId.value && !problemRaw.value.trim()
-  },
-  {
     key: 'problem',
-    label: '合同式联合设计',
+    label: '原创候选池设计',
     state: status.value.problem?.state || 'idle',
-    message: status.value.problem?.message || '一次生成题面、算法合同和 std.cpp',
+    message: status.value.problem?.message || '并发生成多个原创候选，验证后选最高分',
     actionLabel: '设计',
     action: generateProblem,
     disabled: !workspaceId.value
@@ -333,7 +316,6 @@ async function refreshWorkspaceFiles({ includeLogs = false, reloadSelected = fal
   try {
     const fileResp = await api(`/api/workspaces/${workspaceId.value}/files`);
     files.value = fileResp.files || [];
-    await loadProblemRaw();
     if (reloadSelected && selectedFile.value && files.value.includes(selectedFile.value) && !isDirty.value) {
       const text = await readFile(selectedFile.value);
       selectedContent.value = text;
@@ -357,17 +339,6 @@ function scheduleWorkspaceRefresh(delayMs = 0, options = {}) {
   }, delayMs);
 }
 
-async function loadProblemRaw() {
-  if (!files.value.includes('input/problem_raw.md')) return;
-  const text = await readFile('input/problem_raw.md');
-  problemRaw.value = text;
-  if (!selectedFile.value) {
-    selectedFile.value = 'input/problem_raw.md';
-    selectedContent.value = text;
-    editorContent.value = text;
-  }
-}
-
 async function readFile(file) {
   const res = await fetch(`/api/workspaces/${workspaceId.value}/files/${file}`, {
     headers: { 'x-workspace-token': workspaceToken.value }
@@ -388,7 +359,6 @@ async function openFile(file) {
       const text = await readFile(file);
       selectedContent.value = text;
       editorContent.value = text;
-      if (file === 'input/problem_raw.md') problemRaw.value = text;
       return;
     }
     zipPreviewData.value = null;
@@ -415,7 +385,6 @@ async function saveSelectedFile() {
   try {
     await writeFile(selectedFile.value, editorContent.value);
     selectedContent.value = editorContent.value;
-    if (selectedFile.value === 'input/problem_raw.md') problemRaw.value = editorContent.value;
     successMessage.value = '已保存';
     await refreshAll();
   } catch (error) {
@@ -430,22 +399,6 @@ async function writeFile(file, content) {
   });
 }
 
-async function saveProblemRaw() {
-  clearMessages();
-  try {
-    if (!workspaceId.value) await createWorkspace();
-    if (problemRaw.value.length > 2 * 1024 * 1024) throw new Error('题面过大');
-    await writeFile('input/problem_raw.md', problemRaw.value);
-    selectedFile.value = 'input/problem_raw.md';
-    selectedContent.value = problemRaw.value;
-    editorContent.value = problemRaw.value;
-    successMessage.value = '原题素材已保存';
-    await refreshAll();
-  } catch (error) {
-    errorMessage.value = error.message;
-  }
-}
-
 async function generateProblem() {
   clearMessages();
   try {
@@ -454,9 +407,8 @@ async function generateProblem() {
     const result = await api(`/api/workspaces/${workspaceId.value}/problem?async=1`, {
       method: 'POST',
       body: JSON.stringify({
-        difficultyMode: difficultyMode.value,
-        difficultyText: difficultyText.value,
-        sourceText: problemRaw.value
+        difficultyMode: 'custom',
+        difficultyText: difficultyText.value
       })
     });
     if (result.accepted) {

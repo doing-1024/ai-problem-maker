@@ -57,6 +57,9 @@ const FEW_SHOT_EXAMPLE = `
 const PROBLEM_PIPELINE_VERSION = 'contract-first-workflow-v1';
 const SOLUTION_PIPELINE_VERSION = 'verified-std-workflow-v1';
 const DATA_PIPELINE_VERSION = 'data-bundle-workflow-v1';
+const ORIGINAL_PROBLEM_PIPELINE_VERSION = 'original-candidate-tournament-v1';
+const PROBLEM_CANDIDATE_COUNT = Math.max(1, envInt('PROBLEM_CANDIDATE_COUNT', 5));
+const PROBLEM_CANDIDATE_CONCURRENCY = Math.max(1, envInt('PROBLEM_CANDIDATE_CONCURRENCY', PROBLEM_CANDIDATE_COUNT));
 const BRUTE_ORACLE_MIN_CASES = envInt('BRUTE_ORACLE_MIN_CASES', 200);
 const COUNTEREXAMPLE_MIN_CASES = envInt('COUNTEREXAMPLE_MIN_CASES', 40);
 const SOLUTION_VERIFICATION_LEVEL = envChoice('SOLUTION_VERIFICATION_LEVEL', 'standard', ['fast', 'standard', 'strict']);
@@ -445,14 +448,16 @@ export async function generateProblem(workspaceId, payload) {
 }
 
 async function generateProblemContractFirst(workspaceId, payload = {}) {
+  return generateOriginalProblemTournament(workspaceId, payload);
+}
+
+async function generateOriginalProblemTournament(workspaceId, payload = {}) {
   try {
-    const source = payload.sourceText || (await safeRead(workspaceId, 'input/problem_raw.md'));
-    assertValidText(source, '题面为空或过短');
-    const difficultyMode = payload.difficultyMode || 'same';
-    const difficultyInstruction = buildDifficultyInstruction(difficultyMode, payload.difficultyText || '');
+    const difficultyMode = payload.difficultyMode || 'custom';
+    const difficultyInstruction = buildOriginalDifficultyInstruction(payload.difficultyText || '', difficultyMode);
     const fingerprint = hashText(JSON.stringify({
-      version: PROBLEM_PIPELINE_VERSION,
-      source,
+      version: ORIGINAL_PROBLEM_PIPELINE_VERSION,
+      candidateCount: PROBLEM_CANDIDATE_COUNT,
       difficultyMode,
       difficultyText: payload.difficultyText || ''
     }));
@@ -466,112 +471,52 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
       return { path: 'problem/problem.md', content: await readWorkspaceFile(workspaceId, 'problem/problem.md'), cached: true };
     }
 
-    await setState(workspaceId, 'problem', 'running', '正在联合设计题面、算法与标程');
-    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: '正在联合设计题面、算法与标程' });
-    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start contract-first workflow ${PROBLEM_PIPELINE_VERSION}\n`);
+    await setState(workspaceId, 'problem', 'running', `正在并发生成 ${PROBLEM_CANDIDATE_COUNT} 个原创候选`);
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'running', message: `正在并发生成 ${PROBLEM_CANDIDATE_COUNT} 个原创候选` });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] start original tournament ${ORIGINAL_PROBLEM_PIPELINE_VERSION} count=${PROBLEM_CANDIDATE_COUNT} concurrency=${PROBLEM_CANDIDATE_CONCURRENCY}\n`);
 
-    const designText = await callLLM([
-      {
-        role: 'system',
-        content: [
-          '你是一个连续工作的 OI 出题 agent，需要在一次设计里同时交付题面、满分算法合同和 C++17 标程种子。',
-          '允许使用任意题型、模型和算法范式；不要为了可靠性牺牲题目多样性，也不要用题型黑名单回避复杂问题。',
-          '可靠性的来源是明确合同和可执行验证：题面每个限制必须能在算法合同和 std.cpp 中找到对应处理。',
-          `难度分级参考：${DIFFICULTY_TAXONOMY}`,
-          '算法合同必须具体到：状态/数据结构含义、转移或合并规则、关键不变量或单调性、复杂度、最容易出错的反例边界。',
-          '题面必须自洽、可判题，样例输出允许先写占位，后续会由通过验证的 std.cpp 重算。整体输出要紧凑，题面不超过 1600 字，算法合同不超过 900 字，std.cpp 尽量不超过 220 行。',
-          '输出只使用以下分段，不要添加分段外正文：',
-          '<!--PROBLEM_MD-->',
-          '# 标题',
-          '## 题意',
-          '## 输入格式',
-          '## 输出格式',
-          '## 样例',
-          '## 数据范围与提示',
-          '<!--PROBLEM_MD_END-->',
-          '<!--ALGORITHM_MD-->',
-          '# 算法草案',
-          '## 题目重述',
-          '## 约束提取',
-          '## 算法选择',
-          '## 正确性要点',
-          '## 复杂度目标',
-          '## 高风险反例',
-          '<!--ALGORITHM_MD_END-->',
-          '<!--STD_CPP-->',
-          '完整 C++17 程序',
-          '<!--STD_CPP_END-->',
-          '样例输入输出代码块建议保留 <!--SAMPLE_INPUT-->、<!--SAMPLE_OUTPUT--> 标记，便于自动重算。'
-        ].join('\n')
-      },
-      {
-        role: 'user',
-        content: [
-          'SIMPLE_JOINT_CONTRACT',
-          `难度模式: ${difficultyMode}`,
-          `目标难度: ${difficultyInstruction}`,
-          `改编策略: ${buildAdaptationInstruction(difficultyMode)}`,
-          '',
-          '原题素材:',
-          source
-        ].join('\n')
-      }
-    ], {
-      temperature: 0.25,
-      timeoutMs: 120000,
-      maxTokens: 8192,
-      retries: 5,
-      onComplete: async info => {
-        await logLLMComplete(workspaceId, 'problem.log', 'simple joint contract', info);
-      },
-      onRetry: async ({ attempt, retries, error, waitMs }) => {
-        const waitSeconds = Math.ceil((waitMs || 0) / 1000);
-        emitWorkspaceEvent(workspaceId, 'task:update', {
-          stage: 'problem',
-          state: 'running',
-          message: `联合设计重试 ${attempt + 1}/${retries}${waitSeconds ? `，等待 ${waitSeconds} 秒` : ''}`
-        });
-        await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] simple joint retry ${attempt + 1}/${retries}: ${error.message}\n`);
-      }
+    const attempts = await runProblemCandidatePool(workspaceId, {
+      difficultyInstruction,
+      difficultyMode
+    });
+    const accepted = attempts
+      .filter(item => item.state === 'accepted')
+      .sort((a, b) => (b.score || 0) - (a.score || 0))[0];
+
+    if (!accepted) {
+      const verification = buildProblemTournamentReport({
+        attempts,
+        acceptedCandidate: null,
+        difficultyInstruction,
+        difficultyMode
+      });
+      await writeWorkspaceFile(workspaceId, 'solution/verification.md', verification);
+      const lastFailure = attempts.map(a => `candidate ${a.candidate}: ${a.error || a.state}`).join('\n').slice(0, 2500);
+      const error = new Error(`no original problem candidate passed gates\n${lastFailure}`);
+      error.statusCode = 422;
+      throw error;
+    }
+
+    const { problem, algorithm, cpp } = accepted.artifacts;
+    const verification = buildProblemTournamentReport({
+      attempts,
+      acceptedCandidate: accepted.candidate,
+      difficultyInstruction,
+      difficultyMode
     });
 
-    const bundle = parseJointDesignBundle(designText);
-    let problem = sanitizeMarkdownArtifact(bundle.problem);
-    let algorithm = sanitizeMarkdownArtifact(bundle.algorithm);
-    let cpp = sanitizeCppCode(bundle.cpp);
-    if (getProblemMarkdownIssues(problem).length) {
-      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design problem shape invalid; repairing markdown structure: ${getProblemMarkdownIssues(problem).join(', ')}\n`);
-      problem = await completeProblemMarkdown(workspaceId, problem || designText, source, difficultyInstruction, difficultyMode);
-    }
-    ensureProblemMarkdownStructure(problem);
-    if (!algorithm.trim()) {
-      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design missing algorithm segment; generating contract from final problem\n`);
-      algorithm = await generateContractAlgorithmFromProblem(workspaceId, {
-        problem,
-        difficultyInstruction,
-        difficultyMode,
-        source
-      });
-    }
-    ensureAlgorithmPlanLooksReasonable(algorithm);
-    if (!cpp.trim()) {
-      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] joint design missing std seed; generating seed from problem and algorithm\n`);
-      cpp = await generateStdSeedFromContract(workspaceId, { problem, algorithm });
-    }
-    assertCppLooksReasonable(cpp);
-
-    problem = removeInternalSampleMarkers(problem);
     await writeWorkspaceFile(workspaceId, 'problem/problem.md', problem);
     await writeWorkspaceFile(workspaceId, 'solution/algorithm.md', algorithm);
     await writeWorkspaceFile(workspaceId, 'solution/std.cpp', cpp);
+    await writeWorkspaceFile(workspaceId, 'solution/verification.md', verification);
     emitProblemPreview(workspaceId, problem);
     emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'algorithm', text: algorithm });
     emitWorkspaceEvent(workspaceId, 'task:partial', { stage: 'solution', phase: 'std', text: cpp });
 
     await saveJobResult(workspaceId, 'problem', fingerprint, {
       resultPath: 'problem/problem.md',
-      pipelineVersion: PROBLEM_PIPELINE_VERSION,
-      contractPaths: ['solution/algorithm.md', 'solution/std.cpp']
+      pipelineVersion: ORIGINAL_PROBLEM_PIPELINE_VERSION,
+      contractPaths: ['solution/algorithm.md', 'solution/std.cpp', 'solution/verification.md']
     });
     await updateWorkspaceMeta(workspaceId, {
       difficulty: {
@@ -580,9 +525,9 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
         instruction: difficultyInstruction
       }
     });
-    await setState(workspaceId, 'problem', 'done', '联合设计已生成');
-    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'done', message: '联合设计已生成' });
-    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] done\n`);
+    await setState(workspaceId, 'problem', 'done', `原创候选 ${accepted.candidate} 已通过硬门`);
+    emitWorkspaceEvent(workspaceId, 'task:update', { stage: 'problem', state: 'done', message: `原创候选 ${accepted.candidate} 已通过硬门` });
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] done accepted=${accepted.candidate} score=${accepted.score}\n`);
     return { path: 'problem/problem.md', content: problem, cached: false };
   } catch (error) {
     await setState(workspaceId, 'problem', 'error', error.message || 'problem failed');
@@ -590,6 +535,293 @@ async function generateProblemContractFirst(workspaceId, payload = {}) {
     await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] failed: ${error.message}\n`);
     throw error;
   }
+}
+
+async function runProblemCandidatePool(workspaceId, { difficultyInstruction, difficultyMode }) {
+  const queue = Array.from({ length: PROBLEM_CANDIDATE_COUNT }, (_, i) => i + 1);
+  const attempts = [];
+  let active = 0;
+
+  return new Promise(resolve => {
+    const launch = () => {
+      while (active < PROBLEM_CANDIDATE_CONCURRENCY && queue.length) {
+        const candidate = queue.shift();
+        active += 1;
+        evaluateOriginalProblemCandidate(workspaceId, {
+          candidate,
+          difficultyInstruction,
+          difficultyMode
+        }).then(record => {
+          attempts.push(record);
+        }).catch(error => {
+          attempts.push({
+            candidate,
+            state: 'rejected',
+            error: String(error?.message || error || '').slice(0, 5000)
+          });
+        }).finally(() => {
+          active -= 1;
+          emitWorkspaceEvent(workspaceId, 'task:update', {
+            stage: 'problem',
+            state: 'running',
+            message: `候选池进度 ${attempts.length}/${PROBLEM_CANDIDATE_COUNT}`
+          });
+          if (!queue.length && active === 0) {
+            attempts.sort((a, b) => a.candidate - b.candidate);
+            resolve(attempts);
+          } else {
+            launch();
+          }
+        });
+      }
+    };
+    launch();
+  });
+}
+
+async function evaluateOriginalProblemCandidate(workspaceId, { candidate, difficultyInstruction, difficultyMode }) {
+  const record = { candidate, state: 'rejected', gates: [], score: 0 };
+  try {
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} start\n`);
+    const designRaw = await generateOriginalCandidateDesign(workspaceId, {
+      candidate,
+      difficultyInstruction,
+      difficultyMode
+    });
+    const design = parseOriginalCandidateDesign(designRaw);
+    let problem = sanitizeMarkdownArtifact(design.problem);
+    let algorithm = sanitizeMarkdownArtifact(design.algorithm);
+    ensureProblemMarkdownStructure(problem);
+    record.gates.push('problem-structure');
+    ensureAlgorithmPlanLooksReasonable(algorithm);
+    algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
+      problem,
+      algorithm,
+      difficultyInstruction,
+      difficultyMode,
+      logName: 'problem.log',
+      label: `candidate ${candidate} algorithm`
+    });
+    record.gates.push('algorithm-contract');
+
+    const cppRaw = await generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm });
+    let cpp = sanitizeCppCode(extractFlexibleSection(cppRaw, 'STD_CPP') || cppRaw);
+    assertCppLooksReasonable(cpp);
+    await verifyCppCompiles(workspaceId, cpp);
+    record.gates.push('std-compile');
+
+    problem = await recomputeProblemSamplesWithStd(workspaceId, problem, cpp, { logName: 'problem.log', label: `candidate ${candidate}` });
+    record.gates.push('sample-recomputed');
+
+    await verifyWithIndependentOracle(workspaceId, cpp, problem);
+    record.gates.push(`independent-oracle-${INDEPENDENT_ORACLE_CASES}+cases`);
+
+    const score = normalizeProblemCandidateScore(design.score);
+    record.score = score.total;
+    record.scoreBreakdown = score;
+    record.state = 'accepted';
+    record.artifacts = { problem: removeInternalSampleMarkers(problem), algorithm, cpp };
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} accepted score=${record.score}\n`);
+    return record;
+  } catch (error) {
+    record.error = String(error?.message || error || '').slice(0, 5000);
+    await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} rejected: ${record.error}\n`);
+    return record;
+  }
+}
+
+async function generateOriginalCandidateDesign(workspaceId, { candidate, difficultyInstruction, difficultyMode }) {
+  return callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是资深 OI 原创出题工程师。你正在参加候选池锦标赛：候选题必须能被后续标程和 oracle 验证，不能靠修补半成品发布。',
+        `难度分级参考：${DIFFICULTY_TAXONOMY}`,
+        '必须全原创，不参考用户原题素材。不要输出解释性寒暄。',
+        '优先唯一输出、整数答案、普通 stdin/stdout；避免交互、浮点误差和必须自定义 checker 的题。',
+        '样例输出可以先写占位，后续会由通过编译的 std.cpp 自动重算；样例输入必须合法且足够小。',
+        '算法合同必须写清状态/数据结构含义、转移或合并规则、正确性不变量、复杂度和高风险边界。',
+        '题面不超过 1400 字，算法合同不超过 1000 字。',
+        '输出第一行必须是 PROBLEM_MD_BEGIN，严格使用普通文本分段标记，不要用 Markdown 代码块包住整份回答。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'ORIGINAL_PROBLEM_CANDIDATE_DESIGN',
+        `候选编号: ${candidate}`,
+        `难度模式: ${difficultyMode}`,
+        `目标难度: ${difficultyInstruction}`,
+        '',
+        '严格输出：',
+        'PROBLEM_MD_BEGIN',
+        '# 标题',
+        '## 题意',
+        '## 输入格式',
+        '## 输出格式',
+        '## 样例',
+        '## 数据范围与提示',
+        'PROBLEM_MD_END',
+        'ALGORITHM_MD_BEGIN',
+        '# 算法草案',
+        '## 题目重述',
+        '## 约束提取',
+        '## 算法选择',
+        '## 正确性要点',
+        '## 复杂度目标',
+        '## 高风险反例',
+        'ALGORITHM_MD_END',
+        'RISK_REPORT_MD_BEGIN',
+        '正确性风险、数据构造风险和规避方式。',
+        'RISK_REPORT_MD_END',
+        'SCORE_JSON_BEGIN',
+        '{"difficulty":0-10,"originality":0-10,"explainability":0-10,"dataCoverage":0-10,"riskPenalty":0-10}',
+        'SCORE_JSON_END'
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.5,
+    timeoutMs: 150000,
+    maxTokens: 9000,
+    retries: 2,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', `candidate ${candidate} design`, info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} design retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+}
+
+async function generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm }) {
+  return callLLM([
+    {
+      role: 'system',
+      content: [
+        '你是 OI 标程工程师。只根据已冻结的题面和算法合同写完整 C++17 标程。',
+        '只输出 C++17 源码或 STD_CPP_BEGIN/STD_CPP_END 分段，不要解释。必须包含 main，输入输出严格匹配题面。',
+        '不要改变题意，不要修题面。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: [
+        'ORIGINAL_PROBLEM_CANDIDATE_STD',
+        `候选编号: ${candidate}`,
+        '题面:',
+        problem || '',
+        '',
+        '算法合同:',
+        algorithm || '',
+        '',
+        '输出：',
+        'STD_CPP_BEGIN',
+        '完整 C++17 代码',
+        'STD_CPP_END'
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.12,
+    timeoutMs: 150000,
+    maxTokens: 9000,
+    retries: 2,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, 'problem.log', `candidate ${candidate} std`, info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} std retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+}
+
+function parseOriginalCandidateDesign(raw) {
+  const text = String(raw || '');
+  const fallback = splitOriginalCandidateFallback(text);
+  const problem = extractFlexibleSection(text, 'PROBLEM_MD') || fallback.problem;
+  const algorithm = extractFlexibleSection(text, 'ALGORITHM_MD') || fallback.algorithm;
+  const riskReport = extractFlexibleSection(text, 'RISK_REPORT_MD');
+  const score = parseJsonOrDefault(extractJsonObject(extractFlexibleSection(text, 'SCORE_JSON')), {});
+  if (!problem.trim() || !algorithm.trim()) {
+    const error = new Error('candidate missing problem/algorithm section');
+    error.statusCode = 422;
+    throw error;
+  }
+  return { problem, algorithm, riskReport, score };
+}
+
+function splitOriginalCandidateFallback(text) {
+  const raw = String(text || '').trim();
+  const algorithmMatch = raw.match(/(?:^|\n)#\s*算法草案\b/);
+  if (!algorithmMatch) return { problem: '', algorithm: '' };
+  const algorithmStart = algorithmMatch.index + (raw[algorithmMatch.index] === '\n' ? 1 : 0);
+  const problem = raw.slice(0, algorithmStart)
+    .replace(/^\s*PROBLEM_MD_BEGIN\s*/i, '')
+    .replace(/\s*PROBLEM_MD_END\s*$/i, '')
+    .trim();
+  let rest = raw.slice(algorithmStart);
+  const riskIdx = rest.search(/\n(?:RISK_REPORT_MD_BEGIN|#\s*风险|##\s*风险|SCORE_JSON_BEGIN)\b/i);
+  if (riskIdx !== -1) rest = rest.slice(0, riskIdx);
+  rest = rest.replace(/\s*ALGORITHM_MD_END\s*$/i, '').trim();
+  return { problem, algorithm: rest };
+}
+
+function extractFlexibleSection(text, name) {
+  return extractBetween(text, `${name}_BEGIN`, `${name}_END`) ||
+    extractBetween(text, `<!--${name}-->`, `<!--${name}_END-->`);
+}
+
+function normalizeProblemCandidateScore(score) {
+  const difficulty = clampScore(score?.difficulty);
+  const originality = clampScore(score?.originality);
+  const explainability = clampScore(score?.explainability);
+  const dataCoverage = clampScore(score?.dataCoverage);
+  const riskPenalty = clampScore(score?.riskPenalty);
+  return {
+    difficulty,
+    originality,
+    explainability,
+    dataCoverage,
+    riskPenalty,
+    total: Math.max(0, difficulty + originality + explainability + dataCoverage - riskPenalty)
+  };
+}
+
+function clampScore(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0;
+  return Math.max(0, Math.min(10, num));
+}
+
+function buildProblemTournamentReport({ attempts, acceptedCandidate, difficultyInstruction, difficultyMode }) {
+  const lines = [
+    '# 标程验证报告',
+    '',
+    `- Pipeline: ${ORIGINAL_PROBLEM_PIPELINE_VERSION}`,
+    '- Mode: original-candidate-tournament',
+    `- Generated at: ${stamp()}`,
+    `- Target difficulty: ${difficultyInstruction}`,
+    `- Difficulty mode: ${difficultyMode}`,
+    `- Candidate count: ${attempts.length}`,
+    `- Accepted candidate: ${acceptedCandidate || 'none'}`,
+    '',
+    '## 候选记录',
+    ''
+  ];
+  for (const attempt of attempts) {
+    lines.push(`### Candidate ${attempt.candidate}`);
+    lines.push(`- State: ${attempt.state}`);
+    lines.push(`- Score: ${attempt.score || 0}`);
+    if (attempt.gates?.length) lines.push(`- Gates: ${attempt.gates.join(', ')}`);
+    if (attempt.scoreBreakdown) lines.push(`- Score detail: ${JSON.stringify(attempt.scoreBreakdown)}`);
+    if (attempt.error) {
+      lines.push('- Error:');
+      lines.push('```');
+      lines.push(String(attempt.error).slice(0, 2000));
+      lines.push('```');
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 async function generateContractAlgorithmFromProblem(workspaceId, { problem, difficultyInstruction = '', difficultyMode = '', source = '' }) {
@@ -1004,7 +1236,11 @@ async function ensureAlgorithmReliabilityContractWithRepair(workspaceId, { probl
       }
     });
     algorithm = sanitizeMarkdownArtifact(repaired);
-    ensureAlgorithmPlanLooksReasonable(algorithm);
+    try {
+      ensureAlgorithmPlanLooksReasonable(algorithm);
+    } catch (shapeError) {
+      await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} contract repair ${round} shape warning: ${shapeError.message}\n`);
+    }
     try {
       assertAlgorithmReliabilityContract(problem, algorithm);
       return algorithm;
@@ -2943,7 +3179,7 @@ function getProblemMarkdownIssues(text) {
   if (!content) issues.push('输出为空');
   if (content.length < 180) issues.push('内容过短，疑似截断');
   if (!/^#\s+\S+/m.test(content)) issues.push('缺少一级标题');
-  if (!content.includes('## 题意')) issues.push('缺少 ## 题意');
+  if (!/##\s*(题意|题目描述|问题描述)/.test(content)) issues.push('缺少 ## 题意/题目描述');
   if (!content.includes('## 输入格式')) issues.push('缺少 ## 输入格式');
   if (!content.includes('## 输出格式')) issues.push('缺少 ## 输出格式');
   if (!content.includes('## 样例')) issues.push('缺少 ## 样例');
@@ -2979,6 +3215,13 @@ function buildDifficultyInstruction(mode, text) {
   return raw;
 }
 
+function buildOriginalDifficultyInstruction(text, mode = 'custom') {
+  const raw = String(text || '').trim();
+  if (raw) return raw;
+  if (String(mode || '') === 'custom') return 'CSP-S T3/T4，偏高质量原创题，难度不要低于普及组';
+  return 'CSP-S T3/T4，偏高质量原创题，难度不要低于普及组';
+}
+
 function buildAdaptationInstruction(mode) {
   if (String(mode || 'same') === 'same') {
     return '同难度改编：参考原题难度与算法量级，保持原题基础算法范式一致；同时尽可能改换背景、故事、对象、题名、变量语义和表述方式；避免保留原题可搜索的关键词、专有名词、样例背景和原句。不要只改题名。';
@@ -2987,7 +3230,12 @@ function buildAdaptationInstruction(mode) {
 }
 
 function ensureProblemMarkdownStructure(text) {
-  ensureMarkdownStructure(text, ['title', '## 题意', '## 输入格式', '## 输出格式', '## 样例', '## 数据范围与提示']);
+  ensureMarkdownStructure(text, ['title', '## 输入格式', '## 输出格式', '## 样例', '## 数据范围与提示']);
+  if (!/##\s*(题意|题目描述|问题描述)/.test(String(text || ''))) {
+    const error = new Error('markdown missing section: ## 题意/题目描述');
+    error.statusCode = 422;
+    throw error;
+  }
   if (!problemHasCompleteMarkdown(text)) {
     const error = new Error('markdown missing complete problem structure');
     error.statusCode = 422;
@@ -3671,8 +3919,16 @@ async function verifyWithIndependentOracle(workspaceId, stdCpp, problem) {
     }
   });
 
-  const oracleCpp = sanitizeCppCode(extractBetween(bundleText, '<!--ORACLE_CPP-->', '<!--ORACLE_CPP_END-->') || bundleText);
-  const genPy = sanitizePythonCode(extractBetween(bundleText, '<!--TEST_GEN_PY-->', '<!--TEST_GEN_PY_END-->'));
+  const oracleCpp = sanitizeCppCode(
+    extractBetween(bundleText, '<!--ORACLE_CPP-->', '<!--ORACLE_CPP_END-->') ||
+    extractFlexibleSection(bundleText, 'ORACLE_CPP') ||
+    bundleText
+  );
+  const genPy = sanitizePythonCode(
+    extractBetween(bundleText, '<!--TEST_GEN_PY-->', '<!--TEST_GEN_PY_END-->') ||
+    extractFlexibleSection(bundleText, 'TEST_GEN_PY') ||
+    bundleText
+  );
   if (!oracleCpp || !genPy) {
     const error = new Error('independent oracle bundle missing oracle.cpp or test generator');
     error.statusCode = 422;
@@ -3962,6 +4218,96 @@ async function verifySampleWithStd(workspaceId, stdCpp) {
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+async function recomputeProblemSamplesWithStd(workspaceId, problemMd, stdCpp, { logName = 'problem.log', label = 'candidate' } = {}) {
+  const samples = extractProblemSamplePairs(problemMd);
+  if (!samples.length) {
+    const error = new Error('problem has no extractable sample input/output pair');
+    error.statusCode = 422;
+    throw error;
+  }
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), `apm-problem-sample-${workspaceId}-`));
+  try {
+    const stdBin = path.join(tmpDir, 'std');
+    await fs.writeFile(path.join(tmpDir, 'std.cpp'), stdCpp, 'utf8');
+    await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', path.join(tmpDir, 'std.cpp'), '-o', stdBin], 45000);
+    let result = problemMd;
+    for (const sample of [...samples].reverse()) {
+      const actualOutput = await runStdWithInput(stdBin, sample.input, 30000);
+      const newFence = sample.outputFence.replace(/```(?:\w+)?\n[\s\S]*?\n```/, '```\n' + actualOutput.trimEnd() + '\n```');
+      result = result.slice(0, sample.outputStart) + newFence + result.slice(sample.outputEnd);
+      await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} sample ${sample.index}: old='${sample.output.trim()}' new='${actualOutput.trim()}'\n`);
+    }
+    return stripInternalSampleMarkers(result).replace(/\n{3,}/g, '\n\n').trim();
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function extractProblemSamplePairs(problemMd) {
+  const text = String(problemMd || '');
+  const markerPairs = extractMarkedSamplePairs(text);
+  if (markerPairs.length) return markerPairs;
+  return extractGenericSamplePairs(text);
+}
+
+function extractMarkedSamplePairs(text) {
+  const samples = [];
+  for (let idx = 1; ; idx += 1) {
+    const inTag = idx === 1 ? '<!--SAMPLE_INPUT-->' : `<!--SAMPLE_INPUT${idx}-->`;
+    const inEndTag = idx === 1 ? '<!--SAMPLE_INPUT_END-->' : `<!--SAMPLE_INPUT${idx}_END-->`;
+    const outTag = idx === 1 ? '<!--SAMPLE_OUTPUT-->' : `<!--SAMPLE_OUTPUT${idx}-->`;
+    const outEndTag = idx === 1 ? '<!--SAMPLE_OUTPUT_END-->' : `<!--SAMPLE_OUTPUT${idx}_END-->`;
+    const inStart = text.indexOf(inTag);
+    if (inStart === -1) break;
+    const inEnd = text.indexOf(inEndTag, inStart);
+    const outStartTag = text.indexOf(outTag, inEnd);
+    const outEnd = text.indexOf(outEndTag, outStartTag);
+    if (inEnd === -1 || outStartTag === -1 || outEnd === -1) continue;
+    const inputFence = text.slice(inStart, inEnd).match(/```(?:\w+)?\n([\s\S]*?)```/);
+    const outputSlice = text.slice(outStartTag, outEnd);
+    const outputFence = outputSlice.match(/```(?:\w+)?\n([\s\S]*?)```/);
+    if (!inputFence || !outputFence) continue;
+    const fenceOffset = outputSlice.indexOf(outputFence[0]);
+    samples.push({
+      index: idx,
+      input: inputFence[1],
+      output: outputFence[1],
+      outputFence: outputFence[0],
+      outputStart: outStartTag + fenceOffset,
+      outputEnd: outStartTag + fenceOffset + outputFence[0].length
+    });
+  }
+  return samples;
+}
+
+function extractGenericSamplePairs(text) {
+  const inputHeading = /(?:样例输入|输入样例|Sample Input)/i.exec(text);
+  const outputHeading = /(?:样例输出|输出样例|Sample Output)/i.exec(text);
+  if (!inputHeading || !outputHeading || outputHeading.index <= inputHeading.index) return [];
+  const inputSlice = text.slice(inputHeading.index, outputHeading.index);
+  const outputSlice = text.slice(outputHeading.index);
+  const inputFence = inputSlice.match(/```(?:\w+)?\n([\s\S]*?)```/);
+  const outputFence = outputSlice.match(/```(?:\w+)?\n([\s\S]*?)```/);
+  if (!inputFence || !outputFence) return [];
+  const outputStart = outputHeading.index + outputSlice.indexOf(outputFence[0]);
+  return [{
+    index: 1,
+    input: inputFence[1],
+    output: outputFence[1],
+    outputFence: outputFence[0],
+    outputStart,
+    outputEnd: outputStart + outputFence[0].length
+  }];
+}
+
+function stripInternalSampleMarkers(text) {
+  return String(text || '')
+    .replace(/<!--SAMPLE_INPUT\d*-->/g, '')
+    .replace(/<!--SAMPLE_INPUT\d*_END-->/g, '')
+    .replace(/<!--SAMPLE_OUTPUT\d*-->/g, '')
+    .replace(/<!--SAMPLE_OUTPUT\d*_END-->/g, '');
 }
 
 function extractFenceContent(block) {

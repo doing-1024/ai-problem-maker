@@ -69,14 +69,6 @@ try {
   console.log(`workspace=${workspace.workspaceId}`);
   console.log(`accessToken=${workspace.accessToken}`);
 
-  await step('save raw problem', async () => {
-    await api(`/api/workspaces/${workspace.workspaceId}/files/input/problem_raw.md`, {
-      method: 'PUT',
-      token: workspace.accessToken,
-      body: { content: sourceText }
-    });
-  });
-
   const problem = await runJob('generate problem', 'problem', `/api/workspaces/${workspace.workspaceId}/problem?async=1`, [
     'problem/problem.md'
   ], {
@@ -84,7 +76,6 @@ try {
     token: workspace.accessToken,
     timeoutMs: requestTimeoutMs,
     body: {
-      sourceText,
       difficultyMode,
       difficultyText
     }

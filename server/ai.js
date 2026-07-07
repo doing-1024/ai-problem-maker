@@ -113,6 +113,72 @@ export async function callLLM(messages, options = {}) {
 
 function mockLLM(messages, options = {}) {
   const joined = messages.map(item => `${item.role}: ${item.content}`).join('\n');
+  if (joined.includes('ORIGINAL_PROBLEM_CANDIDATE_DESIGN')) {
+    return `PROBLEM_MD_BEGIN
+# 原创求和题
+
+## 题意
+给定一个整数序列，求所有整数之和。
+
+## 输入格式
+第一行一个整数 n。
+第二行 n 个整数。
+
+## 输出格式
+输出一个整数，表示所有整数之和。
+
+## 样例
+
+<!--SAMPLE_INPUT-->
+\`\`\`
+3
+1 2 3
+\`\`\`
+<!--SAMPLE_INPUT_END-->
+<!--SAMPLE_OUTPUT-->
+\`\`\`
+0
+\`\`\`
+<!--SAMPLE_OUTPUT_END-->
+
+## 数据范围与提示
+保证 1 <= n <= 100000，所有整数的绝对值不超过 1000000000。
+PROBLEM_MD_END
+ALGORITHM_MD_BEGIN
+# 算法草案
+
+## 题目重述
+读入 n 个整数并输出它们的总和。
+
+## 约束提取
+n 最大为 100000，数值和可能超过 32 位整数。
+
+## 算法选择
+使用 long long 变量 ans 维护前缀和，顺序读入每个数 x 后执行 ans += x。
+
+## 正确性要点
+不变量：处理前 i 个数后，ans 等于这 i 个数的和。初始为 0，读入一个数后加到 ans 中，不变量保持。处理完 n 个数后 ans 即为全部数之和。
+
+## 复杂度目标
+时间复杂度 O(n)，空间复杂度 O(1)。
+
+## 高风险反例
+n=1、存在负数、正负抵消、总和超过 int。
+ALGORITHM_MD_END
+RISK_REPORT_MD_BEGIN
+低风险唯一输出题，主要风险是 int 溢出，使用 long long 规避。
+RISK_REPORT_MD_END
+SCORE_JSON_BEGIN
+{"difficulty":6,"originality":6,"explainability":9,"dataCoverage":9,"riskPenalty":0}
+SCORE_JSON_END`;
+  }
+
+  if (joined.includes('ORIGINAL_PROBLEM_CANDIDATE_STD')) {
+    return `STD_CPP_BEGIN
+${MOCK_CPP}
+STD_CPP_END`;
+  }
+
   if (joined.includes('SIMPLE_JOINT_CONTRACT')) {
     return `<!--PROBLEM_MD-->
 # 改编题目
