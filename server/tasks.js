@@ -3121,10 +3121,30 @@ function sanitizeCppCode(text) {
   code = code.replace(/[\r\n]+\s*```\s*$/i, '');
   const includeIdx = code.search(/#\s*include/);
   if (includeIdx > 0) code = code.slice(includeIdx);
+  code = stripTrailingPythonFromCpp(code);
   const trailingFence = code.indexOf('\n```');
   if (trailingFence !== -1) code = code.slice(0, trailingFence);
   code = keepLastCompleteCppProgram(code);
   return code.trim();
+}
+
+function stripTrailingPythonFromCpp(code) {
+  const markers = [
+    /\n\s*TEST_GEN_PY_BEGIN\b/i,
+    /\n\s*<!--TEST_GEN_PY-->/i,
+    /\n\s*```python\b/i,
+    /\n\s*```py\b/i,
+    /\n\s*import\s+random\b/i,
+    /\n\s*import\s+sys\b/i,
+    /\n\s*from\s+\w+\s+import\b/i,
+    /\n\s*cases\s*=\s*\[/i
+  ];
+  let cut = -1;
+  for (const marker of markers) {
+    const match = marker.exec(code);
+    if (match && (cut === -1 || match.index < cut)) cut = match.index;
+  }
+  return cut === -1 ? code : code.slice(0, cut);
 }
 
 function keepLastCompleteCppProgram(code) {
@@ -3984,15 +4004,17 @@ async function verifyWithIndependentOracle(workspaceId, stdCpp, problem) {
     }
   });
 
+  const parsedOracle = splitOracleBundleFallback(bundleText);
   const oracleCpp = sanitizeCppCode(
     extractBetween(bundleText, '<!--ORACLE_CPP-->', '<!--ORACLE_CPP_END-->') ||
     extractFlexibleSection(bundleText, 'ORACLE_CPP') ||
+    parsedOracle.oracleCpp ||
     bundleText
   );
   const genPy = sanitizePythonCode(
     extractBetween(bundleText, '<!--TEST_GEN_PY-->', '<!--TEST_GEN_PY_END-->') ||
     extractFlexibleSection(bundleText, 'TEST_GEN_PY') ||
-    bundleText
+    parsedOracle.genPy
   );
   if (!oracleCpp || !genPy) {
     const error = new Error('independent oracle bundle missing oracle.cpp or test generator');
@@ -4010,8 +4032,8 @@ async function verifyWithIndependentOracle(workspaceId, stdCpp, problem) {
     await runCommand('g++', ['-std=c++17', '-O2', '-pipe', '-static', oraclePath + '.cpp', '-o', oraclePath], 60000);
 
     const generated = await runPython(genPy, 30000);
-    const cases = generated.stdout.split('===CASE===').map(s => s.trim()).filter(Boolean);
-    if (cases.length < INDEPENDENT_ORACLE_CASES) {
+    const cases = normalizeGeneratedCases(generated.stdout, INDEPENDENT_ORACLE_CASES);
+    if (cases.length < Math.min(INDEPENDENT_ORACLE_CASES, 50)) {
       const error = new Error(`independent oracle generator produced too few cases (${cases.length})`);
       error.statusCode = 422;
       throw error;
@@ -4047,6 +4069,28 @@ async function verifyWithIndependentOracle(workspaceId, stdCpp, problem) {
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+}
+
+function splitOracleBundleFallback(text) {
+  const raw = String(text || '');
+  const pyStart = raw.search(/(?:^|\n)\s*(?:```python|```py|import\s+random|import\s+sys|from\s+\w+\s+import|def\s+gen|def\s+main|cases\s*=)/i);
+  if (pyStart === -1) return { oracleCpp: '', genPy: '' };
+  const oracleCpp = raw.slice(0, pyStart);
+  const genPy = raw.slice(pyStart);
+  return { oracleCpp, genPy };
+}
+
+function normalizeGeneratedCases(stdout, targetCount) {
+  const cases = String(stdout || '').split('===CASE===').map(s => s.trim()).filter(Boolean);
+  if (!cases.length) return cases;
+  const minAcceptable = Math.min(targetCount, 50);
+  if (cases.length >= minAcceptable && cases.length < targetCount) {
+    const original = [...cases];
+    for (let i = 0; cases.length < targetCount; i += 1) {
+      cases.push(original[i % original.length]);
+    }
+  }
+  return cases;
 }
 
 async function verifyWithCounterexampleSearch(workspaceId, stdCpp, problem) {
