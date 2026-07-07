@@ -583,17 +583,15 @@ async function evaluateOriginalProblemCandidate(workspaceId, { candidate, diffic
   const record = { candidate, state: 'rejected', gates: [], score: 0 };
   try {
     await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} start\n`);
-    const designRaw = await generateOriginalCandidateDesign(workspaceId, {
+    const design = await generateValidOriginalCandidateDesign(workspaceId, {
       candidate,
       difficultyInstruction,
       difficultyMode
     });
-    const design = parseOriginalCandidateDesign(designRaw);
-    let problem = sanitizeMarkdownArtifact(design.problem);
-    let algorithm = sanitizeMarkdownArtifact(design.algorithm);
-    ensureProblemMarkdownStructure(problem);
+    let problem = design.problem;
+    let algorithm = design.algorithm;
     record.gates.push('problem-structure');
-    ensureAlgorithmPlanLooksReasonable(algorithm);
+    record.gates.push('algorithm-shape');
     algorithm = await ensureAlgorithmReliabilityContractWithRepair(workspaceId, {
       problem,
       algorithm,
@@ -604,16 +602,13 @@ async function evaluateOriginalProblemCandidate(workspaceId, { candidate, diffic
     });
     record.gates.push('algorithm-contract');
 
-    const cppRaw = await generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm });
-    let cpp = sanitizeCppCode(extractFlexibleSection(cppRaw, 'STD_CPP') || cppRaw);
-    assertCppLooksReasonable(cpp);
-    await verifyCppCompiles(workspaceId, cpp);
+    let cpp = await generateValidOriginalCandidateStd(workspaceId, { candidate, problem, algorithm });
     record.gates.push('std-compile');
 
     problem = await recomputeProblemSamplesWithStd(workspaceId, problem, cpp, { logName: 'problem.log', label: `candidate ${candidate}` });
     record.gates.push('sample-recomputed');
 
-    await verifyWithIndependentOracle(workspaceId, cpp, problem);
+    await verifyIndependentOracleWithRetry(workspaceId, cpp, problem, { logName: 'problem.log', label: `candidate ${candidate}` });
     record.gates.push(`independent-oracle-${INDEPENDENT_ORACLE_CASES}+cases`);
 
     const score = normalizeProblemCandidateScore(design.score);
@@ -630,7 +625,66 @@ async function evaluateOriginalProblemCandidate(workspaceId, { candidate, diffic
   }
 }
 
-async function generateOriginalCandidateDesign(workspaceId, { candidate, difficultyInstruction, difficultyMode }) {
+async function generateValidOriginalCandidateDesign(workspaceId, { candidate, difficultyInstruction, difficultyMode }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const designRaw = await generateOriginalCandidateDesign(workspaceId, {
+        candidate,
+        difficultyInstruction,
+        difficultyMode,
+        attempt
+      });
+      const design = parseOriginalCandidateDesign(designRaw);
+      const problem = sanitizeMarkdownArtifact(design.problem);
+      const algorithm = sanitizeMarkdownArtifact(design.algorithm);
+      ensureProblemMarkdownStructure(problem);
+      ensureAlgorithmPlanLooksReasonable(algorithm);
+      return { ...design, problem, algorithm };
+    } catch (error) {
+      lastError = error;
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} design content retry ${attempt}/3: ${error.message}\n`);
+    }
+  }
+  throw lastError || new Error('candidate design failed');
+}
+
+async function generateValidOriginalCandidateStd(workspaceId, { candidate, problem, algorithm }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const cppRaw = await generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm, attempt });
+      const cpp = sanitizeCppCode(extractFlexibleSection(cppRaw, 'STD_CPP') || cppRaw);
+      assertCppLooksReasonable(cpp);
+      await verifyCppCompiles(workspaceId, cpp);
+      return cpp;
+    } catch (error) {
+      lastError = error;
+      await appendWorkspaceLog(workspaceId, 'problem.log', `[${stamp()}] candidate ${candidate} std content retry ${attempt}/3: ${error.message}\n`);
+    }
+  }
+  throw lastError || new Error('candidate std generation failed');
+}
+
+async function verifyIndependentOracleWithRetry(workspaceId, cpp, problem, { logName = 'problem.log', label = 'candidate' } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await verifyWithIndependentOracle(workspaceId, cpp, problem);
+    } catch (error) {
+      lastError = error;
+      await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} independent oracle retry ${attempt}/3: ${error.message}\n`);
+      if (!isRetryableOracleFailure(error)) throw error;
+    }
+  }
+  throw lastError || new Error('independent oracle verification failed');
+}
+
+function isRetryableOracleFailure(error) {
+  return /missing oracle\.cpp|test generator|compile failed|not found|timeout|LLM request failed|502|503|504|Cloudflare|bad gateway/i.test(String(error?.message || ''));
+}
+
+async function generateOriginalCandidateDesign(workspaceId, { candidate, difficultyInstruction, difficultyMode, attempt = 1 }) {
   return callLLM([
     {
       role: 'system',
@@ -650,6 +704,7 @@ async function generateOriginalCandidateDesign(workspaceId, { candidate, difficu
       content: [
         'ORIGINAL_PROBLEM_CANDIDATE_DESIGN',
         `候选编号: ${candidate}`,
+        `候选重试: ${attempt}/3`,
         `难度模式: ${difficultyMode}`,
         `目标难度: ${difficultyInstruction}`,
         '',
@@ -683,7 +738,7 @@ async function generateOriginalCandidateDesign(workspaceId, { candidate, difficu
     temperature: 0.5,
     timeoutMs: 150000,
     maxTokens: 9000,
-    retries: 2,
+    retries: 3,
     onComplete: async info => {
       await logLLMComplete(workspaceId, 'problem.log', `candidate ${candidate} design`, info);
     },
@@ -693,7 +748,7 @@ async function generateOriginalCandidateDesign(workspaceId, { candidate, difficu
   });
 }
 
-async function generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm }) {
+async function generateOriginalCandidateStd(workspaceId, { candidate, problem, algorithm, attempt = 1 }) {
   return callLLM([
     {
       role: 'system',
@@ -708,6 +763,7 @@ async function generateOriginalCandidateStd(workspaceId, { candidate, problem, a
       content: [
         'ORIGINAL_PROBLEM_CANDIDATE_STD',
         `候选编号: ${candidate}`,
+        `标程重试: ${attempt}/3`,
         '题面:',
         problem || '',
         '',
@@ -724,7 +780,7 @@ async function generateOriginalCandidateStd(workspaceId, { candidate, problem, a
     temperature: 0.12,
     timeoutMs: 150000,
     maxTokens: 9000,
-    retries: 2,
+    retries: 3,
     onComplete: async info => {
       await logLLMComplete(workspaceId, 'problem.log', `candidate ${candidate} std`, info);
     },
