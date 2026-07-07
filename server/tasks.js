@@ -605,6 +605,9 @@ async function evaluateOriginalProblemCandidate(workspaceId, { candidate, diffic
     let cpp = await generateValidOriginalCandidateStd(workspaceId, { candidate, problem, algorithm });
     record.gates.push('std-compile');
 
+    cpp = await crossReviewStdCpp(workspaceId, cpp, problem, null);
+    record.gates.push('llm-code-review');
+
     problem = await recomputeProblemSamplesWithStd(workspaceId, problem, cpp, { logName: 'problem.log', label: `candidate ${candidate}` });
     record.gates.push('sample-recomputed');
 
@@ -693,6 +696,8 @@ async function generateOriginalCandidateDesign(workspaceId, { candidate, difficu
         `难度分级参考：${DIFFICULTY_TAXONOMY}`,
         '必须全原创，不参考用户原题素材。不要输出解释性寒暄。',
         '优先唯一输出、整数答案、普通 stdin/stdout；避免交互、浮点误差和必须自定义 checker 的题。',
+        '优先选择能用清晰 DP、图论、贪心证明、最短路、区间/序列数据结构解决的原创题。不要把树上路径查询、独立集、异或/FWT、动态修改、多状态资源约束等多个高风险机制叠在一起。',
+        '如果使用树/路径/区间数据结构，必须让片段合并规则非常简单，并能被 200 行以内 C++17 稳定实现；否则换一个更稳的原创模型。',
         '样例输出可以先写占位，后续会由通过编译的 std.cpp 自动重算；样例输入必须合法且足够小。',
         '算法合同必须写清状态/数据结构含义、转移或合并规则、正确性不变量、复杂度和高风险边界。',
         '题面不超过 1400 字，算法合同不超过 1000 字。',
