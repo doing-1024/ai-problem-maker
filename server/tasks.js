@@ -1853,7 +1853,11 @@ async function repairAlgorithmContractAfterStdFailure(workspaceId, { problem, al
     }
   });
   const cleaned = sanitizeMarkdownArtifact(repaired);
-  ensureAlgorithmPlanLooksReasonable(cleaned);
+  try {
+    ensureAlgorithmPlanLooksReasonable(cleaned);
+  } catch (shapeError) {
+    await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] algorithm contract after std failure ${candidate} shape warning: ${shapeError.message}\n`);
+  }
   await appendWorkspaceLog(workspaceId, 'solution.log', `[${stamp()}] algorithm contract rewritten after candidate ${candidate} failure\n`);
   return cleaned;
 }
