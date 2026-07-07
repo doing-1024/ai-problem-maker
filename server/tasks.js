@@ -605,7 +605,7 @@ async function evaluateOriginalProblemCandidate(workspaceId, { candidate, diffic
     let cpp = await generateValidOriginalCandidateStd(workspaceId, { candidate, problem, algorithm });
     record.gates.push('std-compile');
 
-    cpp = await crossReviewStdCpp(workspaceId, cpp, problem, null);
+    await reviewStdCppOnce(workspaceId, cpp, problem, { logName: 'problem.log', label: `candidate ${candidate}` });
     record.gates.push('llm-code-review');
 
     problem = await recomputeProblemSamplesWithStd(workspaceId, problem, cpp, { logName: 'problem.log', label: `candidate ${candidate}` });
@@ -3516,6 +3516,47 @@ async function repairCppCompilation(workspaceId, cpp, problem) {
     }
   }
   return current;
+}
+
+async function reviewStdCppOnce(workspaceId, cpp, problem, { logName = 'problem.log', label = 'candidate' } = {}) {
+  const review = await callLLM([
+    {
+      role: 'system',
+      content: '你是严格的 OI 代码审查员。只判断候选 std.cpp 是否可作为题面满分正解，不修代码。标记为 CODE_REVIEW。\n'
+        + '必须检查：输入输出是否匹配题面；是否处理所有限制和边界；核心算法是否正确；复杂度是否适配数据范围；是否存在明显反例、溢出或数组越界。\n'
+        + '如果题面/算法涉及树上路径、区间合并、动态规划、贪心、异或、容量/能量等复杂机制，必须确认代码真的实现了对应状态、转移、合并规则和不变量。\n'
+        + '输出第一行只能是 PASS 或 FAIL。若 FAIL，简要列出最关键的 1-3 个不可接受问题。'
+    },
+    {
+      role: 'user',
+      content: [
+        'CODE_REVIEW',
+        '题目：',
+        problem || '',
+        '',
+        '候选 std.cpp：',
+        cpp || ''
+      ].join('\n')
+    }
+  ], {
+    temperature: 0.05,
+    timeoutMs: 90000,
+    maxTokens: 2048,
+    retries: 3,
+    onComplete: async info => {
+      await logLLMComplete(workspaceId, logName, `${label} one-shot code review`, info);
+    },
+    onRetry: async ({ attempt, retries, error }) => {
+      await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} one-shot review retry ${attempt + 1}/${retries}: ${error.message}\n`);
+    }
+  });
+  await appendWorkspaceLog(workspaceId, logName, `[${stamp()}] ${label} one-shot review: ${review.slice(0, 800)}\n`);
+  if (!reviewPassed(review)) {
+    const error = new Error(`candidate code review failed: ${review.slice(0, 1000)}`);
+    error.statusCode = 422;
+    throw error;
+  }
+  return true;
 }
 
 async function crossReviewStdCpp(workspaceId, cpp, problem, reliability = null) {

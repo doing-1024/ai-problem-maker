@@ -329,6 +329,23 @@ async function dumpArtifacts(files) {
 }
 
 async function api(path, options = {}) {
+  const retries = Number(options.retries ?? rateLimitRetries);
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await rawApi(path, options);
+    } catch (error) {
+      lastError = error;
+      if (error?.statusCode === 429 || attempt >= retries || !isRetryableApiError(error)) throw error;
+      const waitMs = Math.min(30_000, 3000 * (attempt + 1));
+      console.warn(`api retry ${attempt + 1}/${retries} for ${path}: ${String(error.message || error).slice(0, 160)}`);
+      await sleep(waitMs);
+    }
+  }
+  throw lastError || new Error('api retry loop exited unexpectedly');
+}
+
+async function rawApi(path, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || 120000);
   try {
@@ -364,6 +381,20 @@ async function api(path, options = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function isRetryableApiError(error) {
+  const status = Number(error?.statusCode || 0);
+  const message = String(error?.message || '').toLowerCase();
+  const raw = String(error?.body?.raw || '').toLowerCase();
+  return status >= 500
+    || message.includes('fetch failed')
+    || message.includes('aborted')
+    || message.includes('terminated')
+    || message.includes('eof')
+    || message.includes('<!doctype html')
+    || raw.includes('<!doctype html')
+    || raw.includes('hugging face');
 }
 
 function isLikelyLongRequestDisconnect(error) {
